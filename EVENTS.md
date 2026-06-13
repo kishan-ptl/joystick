@@ -14,6 +14,7 @@ Each operation is two events sharing an `id` — a `start` and an `end`.
 // start
 {"v":1,"kind":"shell","ev":"start","id":"<unique>","cmd":"<text>","cwd":"<path>","pid":<int>,"tty":"<dev>","surface":"<ghostty-id>","ts":<unix>}
 // end   (dur optional — viewer computes end.ts - start.ts if omitted; exit -1 = killed)
+//        (msg optional — Claude turns carry the closing blurb; shown on the finished row)
 {"v":1,"ev":"end","id":"<same id>","exit":<int>,"dur":<secs>,"ts":<unix>}
 // waiting / active  (optional — drives the amber "needs you" state)
 {"v":1,"ev":"waiting","id":"<id>","msg":"<why>","ts":<unix>}
@@ -39,7 +40,7 @@ Each operation is two events sharing an `id` — a `start` and an `end`.
 | `tty` | terminal device (shell ops only; empty for claude/external — see `kind`) |
 | `surface` | Ghostty surface id, for click-to-focus |
 | `ts` | unix seconds |
-| `exit` / `dur` / `msg` | end status / duration / waiting reason |
+| `exit` / `dur` / `msg` | end status / duration / reason (waiting why, or Claude's closing blurb on `end`) |
 
 ## Producers
 

@@ -45,6 +45,7 @@ struct Op: Identifiable {
     var stallIdle: Double? = nil      // heuristic: tty quiet + fg proc asleep
     var isService = false             // fg process group holds a listening port
     var unseen = false                // finished, and surface not viewed since
+    var summary: String? = nil        // Claude's closing blurb, on the end event
 
     var id: String { "\(key)-\(Int(start))" }
     var isRunning: Bool { endTs == nil }
@@ -409,6 +410,7 @@ final class Store: ObservableObject {
                 op.endTs = e.ts
                 op.exitCode = e.exit ?? 0
                 op.dur = e.dur ?? max(0, e.ts - op.start)
+                op.summary = e.msg        // Claude's closing blurb (claude turns only)
                 parsedDone.append(op)
             }
         case "waiting":
@@ -679,6 +681,14 @@ struct OpRow: View {
                 Text(op.cmd)
                     .font(.system(.body, design: .monospaced))
                     .lineLimit(2)
+                if let blurb = op.summary, !blurb.isEmpty, !op.isRunning {
+                    // What Claude said when it finished — the reply, distinct
+                    // from the prompt above and the metadata below.
+                    Text("↳ \(blurb)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
                 Text(subtitle)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)

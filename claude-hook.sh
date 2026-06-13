@@ -88,8 +88,21 @@ case $event in
     [[ $last == *'"ev":"start"'* ]] || exit 0
     start_ts=$(jq -r '.ts // 0' <<<"$last")
     elapsed=$(( now - start_ts ))
-    jq -cn --arg id "$id" --argjson ts "$now" --argjson dur "$elapsed" \
-      '{v:1,ev:"end",id:$id,exit:0,dur:$dur,ts:$ts}' >> "$LOG"
+    # Claude's closing blurb = the last assistant text block in the transcript.
+    # Show it on the finished row so you can see what it said without switching
+    # back. tail keeps this cheap on multi-MB transcripts (the final text is
+    # always the last assistant entry); flatten to one line, then redact + cap
+    # like every other free-text field so the log line stays < PIPE_BUF and
+    # never stores a secret. Empty (turn ended on a tool call / no text) → omit.
+    tpath=$(jq -r '.transcript_path // empty' <<<"$input")
+    summary=""
+    if [[ -n $tpath && -s $tpath ]]; then
+      summary=$(tail -n 200 "$tpath" | jq -rc 'select(.type=="assistant")|.message.content[]?|select(.type=="text")|.text' 2>/dev/null | tail -1)
+      summary=${summary//[$'\n\t\r']/ }
+      _joystick_redact "$summary"; summary=${REPLY[1,240]}
+    fi
+    jq -cn --arg id "$id" --arg msg "$summary" --argjson ts "$now" --argjson dur "$elapsed" \
+      '{v:1,ev:"end",id:$id,exit:0,dur:$dur,ts:$ts} + (if $msg != "" then {msg:$msg} else {} end)' >> "$LOG"
     if (( elapsed >= MIN_NOTIFY_SECS )) && ! ghostty_frontmost; then
       notify "Claude Code — done" "Finished after $((elapsed / 60))m$((elapsed % 60))s in ${cwd:t}"
     fi
