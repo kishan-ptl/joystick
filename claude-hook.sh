@@ -2,7 +2,7 @@
 # claude-hook.sh — Claude Code hook handler for joystick.
 # Wired to UserPromptSubmit / Stop / Notification in ~/.claude/settings.json.
 #
-# UserPromptSubmit -> joystick "start" event (turn shows as running in SwiftBar)
+# UserPromptSubmit -> joystick "start" event (turn shows as running in Joystick)
 # Stop             -> joystick "end" event + desktop notification if the turn
 #                     ran >= MIN_NOTIFY_SECS and Ghostty isn't frontmost
 # Notification     -> desktop notification (Claude waiting on permission/input)
@@ -21,7 +21,7 @@ now=$(date +%s)
 id="claude-$sid"
 
 # Walk up the process tree to find the long-lived claude process, so the
-# SwiftBar viewer's pid-liveness check tracks the session, not this hook.
+# viewer's pid-liveness check tracks the session, not this hook.
 claude_pid() {
   local p=$PPID comm i
   for i in 1 2 3 4 5; do
@@ -59,9 +59,11 @@ case $event in
       surface=$(osascript -e 'tell application "Ghostty" to get id of focused terminal of selected tab of front window' 2>/dev/null) || surface=""
       [[ -n $surface ]] && print -r -- "$surface" > "$scache"
     fi
+    # The 120-char prompt cap keeps the line < PIPE_BUF (4096) so concurrent
+    # appends from other shells/hooks stay atomic — don't raise it materially.
     jq -cn --arg id "$id" --arg cmd "🤖 ${prompt[1,120]}" --arg cwd "$cwd" \
       --arg surface "$surface" --argjson pid "$(claude_pid)" --argjson ts "$now" \
-      '{ev:"start",id:$id,cmd:$cmd,cwd:$cwd,pid:$pid,tty:"claude",surface:$surface,ts:$ts}' >> "$LOG"
+      '{v:1,ev:"start",id:$id,cmd:$cmd,cwd:$cwd,pid:$pid,tty:"claude",surface:$surface,ts:$ts}' >> "$LOG"
     ;;
   Stop)
     rm -f "${LOG:h}/waiting-$sid"
@@ -72,7 +74,7 @@ case $event in
     start_ts=$(jq -r '.ts // 0' <<<"$last")
     elapsed=$(( now - start_ts ))
     jq -cn --arg id "$id" --argjson ts "$now" --argjson dur "$elapsed" \
-      '{ev:"end",id:$id,exit:0,dur:$dur,ts:$ts}' >> "$LOG"
+      '{v:1,ev:"end",id:$id,exit:0,dur:$dur,ts:$ts}' >> "$LOG"
     if (( elapsed >= MIN_NOTIFY_SECS )) && ! ghostty_frontmost; then
       notify "Claude Code — done" "Finished after $((elapsed / 60))m$((elapsed % 60))s in ${cwd:t}"
     fi
@@ -91,7 +93,7 @@ case $event in
       *) msg=${msg#Claude } ;;
     esac
     jq -cn --arg id "$id" --arg msg "$msg" --argjson ts "$now" \
-      '{ev:"waiting",id:$id,msg:$msg,ts:$ts}' >> "$LOG"
+      '{v:1,ev:"waiting",id:$id,msg:$msg,ts:$ts}' >> "$LOG"
     : > "${LOG:h}/waiting-$sid"
     if ! ghostty_frontmost; then
       notify "Claude Code — waiting" "$msg (${cwd:t})"
@@ -102,7 +104,7 @@ case $event in
     marker="${LOG:h}/waiting-$sid"
     [[ -f $marker ]] || exit 0
     rm -f "$marker"
-    jq -cn --arg id "$id" --argjson ts "$now" '{ev:"active",id:$id,ts:$ts}' >> "$LOG"
+    jq -cn --arg id "$id" --argjson ts "$now" '{v:1,ev:"active",id:$id,ts:$ts}' >> "$LOG"
     ;;
 esac
 exit 0

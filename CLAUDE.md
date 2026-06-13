@@ -68,6 +68,10 @@ These were decided by using the tool; they define what it is.
 - **After editing `Joystick.swift`:** rebuild + restart (above) to see changes.
 - **zsh gotcha:** redaction uses `emulate -L zsh` so user shell options
   (bash_rematch) can't silently break the `$MATCH` vars. Keep it.
+- **Log lines must stay < ~4096 bytes (PIPE_BUF)** so concurrent `>>` appends
+  from many shells/hooks stay atomic. That's why `cmd` is capped at 300 and
+  prompts at 120 — do NOT raise those caps. Events carry `"v":1` (schema
+  version); the log contract is in `EVENTS.md`.
 - **SourceKit false positive:** "'main' attribute cannot be used in a module
   that contains top-level code" on `Joystick.swift` is expected — `build-app.sh`
   passes `-parse-as-library`. Not a real error.

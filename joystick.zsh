@@ -1,6 +1,6 @@
 # joystick — logs command start/end events from interactive zsh sessions.
-# Sourced from ~/.zshrc. The SwiftBar plugin (~/.config/swiftbar/joystick.5s.py)
-# and Joystick.app read these events to show running/finished operations.
+# Sourced from ~/.zshrc. Joystick.app reads these events to show
+# running/finished operations across terminal tabs.
 #
 # Events file: ~/.local/state/joystick/events.jsonl (one JSON object per line)
 
@@ -67,15 +67,18 @@ _joystick_preexec() {
     [[ -n ${w[2]:-} && $w[2] != -* ]] && raw="$w[1] $w[2]"
   fi
   _joystick_redact "$raw"; raw=$REPLY      # redact before truncating, so a
-  _joystick_esc "${raw[1,300]}"; cmd=$REPLY  # cut token can't slip through
+  # cut token can't slip through. The 300-char cap is also LOAD-BEARING for
+  # atomicity: concurrent ">>" appends from many shells/hooks only stay intact
+  # while each line is < ~4096 bytes (PIPE_BUF). Don't raise it past ~3KB.
+  _joystick_esc "${raw[1,300]}"; cmd=$REPLY
   _joystick_esc "$PWD"; cwd=$REPLY
-  print -r -- "{\"ev\":\"start\",\"id\":\"$_joystick_id\",\"cmd\":\"$cmd\",\"cwd\":\"$cwd\",\"pid\":$$,\"tty\":\"${TTY:t}\",\"surface\":\"$surface\",\"ts\":$EPOCHSECONDS}" >> "$JOYSTICK_LOG"
+  print -r -- "{\"v\":1,\"ev\":\"start\",\"id\":\"$_joystick_id\",\"cmd\":\"$cmd\",\"cwd\":\"$cwd\",\"pid\":$$,\"tty\":\"${TTY:t}\",\"surface\":\"$surface\",\"ts\":$EPOCHSECONDS}" >> "$JOYSTICK_LOG"
 }
 
 _joystick_precmd() {
   local code=$?
   [[ -n ${_joystick_id:-} ]] || return 0
-  print -r -- "{\"ev\":\"end\",\"id\":\"$_joystick_id\",\"exit\":$code,\"dur\":$((EPOCHSECONDS - _joystick_start)),\"ts\":$EPOCHSECONDS}" >> "$JOYSTICK_LOG"
+  print -r -- "{\"v\":1,\"ev\":\"end\",\"id\":\"$_joystick_id\",\"exit\":$code,\"dur\":$((EPOCHSECONDS - _joystick_start)),\"ts\":$EPOCHSECONDS}" >> "$JOYSTICK_LOG"
   unset _joystick_id _joystick_start
 }
 
@@ -83,7 +86,7 @@ _joystick_precmd() {
 # emit an end event with exit -1 so the viewer doesn't show it forever.
 _joystick_exit() {
   [[ -n ${_joystick_id:-} ]] || return 0
-  print -r -- "{\"ev\":\"end\",\"id\":\"$_joystick_id\",\"exit\":-1,\"dur\":$((EPOCHSECONDS - _joystick_start)),\"ts\":$EPOCHSECONDS}" >> "$JOYSTICK_LOG" 2>/dev/null
+  print -r -- "{\"v\":1,\"ev\":\"end\",\"id\":\"$_joystick_id\",\"exit\":-1,\"dur\":$((EPOCHSECONDS - _joystick_start)),\"ts\":$EPOCHSECONDS}" >> "$JOYSTICK_LOG" 2>/dev/null
 }
 
 add-zsh-hook preexec _joystick_preexec

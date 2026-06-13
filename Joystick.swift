@@ -11,6 +11,7 @@ import Darwin
 // MARK: - Events & operations
 
 struct RawEvent: Decodable {
+    let v: Int?            // schema version (1); absent on pre-versioning events
     let ev: String
     let id: String
     let cmd: String?
@@ -206,9 +207,15 @@ final class Store: ObservableObject {
             let g = bySurface[key]!
             if g.current.isRunning { active.append(g) } else { idle.append(g) }
         }
-        // Waiting terminals on top, then active ops, then services (ambient).
+        // Waiting terminals on top, longest-BLOCKED first (the needs-you inbox),
+        // then active ops, then services (ambient).
+        func blockedSecs(_ op: Op) -> Double {
+            if let since = op.waitingSince { return nowTs - since }
+            return op.stallIdle ?? 0   // stallIdle already = seconds blocked
+        }
         active.sort { a, b in
             if a.current.isWaiting != b.current.isWaiting { return a.current.isWaiting }
+            if a.current.isWaiting && b.current.isWaiting { return blockedSecs(a.current) > blockedSecs(b.current) }
             if a.current.isService != b.current.isService { return !a.current.isService }
             return a.current.start < b.current.start
         }

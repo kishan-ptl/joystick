@@ -12,18 +12,25 @@ Each operation is two events sharing an `id` — a `start` and an `end`.
 
 ```jsonc
 // start
-{"ev":"start","id":"<unique>","cmd":"<text>","cwd":"<path>","pid":<int>,"tty":"<dev>","surface":"<ghostty-id>","ts":<unix>}
+{"v":1,"ev":"start","id":"<unique>","cmd":"<text>","cwd":"<path>","pid":<int>,"tty":"<dev>","surface":"<ghostty-id>","ts":<unix>}
 // end   (dur optional — viewer computes end.ts - start.ts if omitted; exit -1 = killed)
-{"ev":"end","id":"<same id>","exit":<int>,"dur":<secs>,"ts":<unix>}
+{"v":1,"ev":"end","id":"<same id>","exit":<int>,"dur":<secs>,"ts":<unix>}
 // waiting / active  (optional — drives the amber "needs you" state)
-{"ev":"waiting","id":"<id>","msg":"<why>","ts":<unix>}
-{"ev":"active","id":"<id>","ts":<unix>}
+{"v":1,"ev":"waiting","id":"<id>","msg":"<why>","ts":<unix>}
+{"v":1,"ev":"active","id":"<id>","ts":<unix>}
 ```
+
+> **Line-size invariant (load-bearing):** keep every line **under ~4096 bytes
+> (PIPE_BUF)** so concurrent `>>` appends from multiple producers stay atomic
+> and never interleave. Cap free-text fields — Joystick caps `cmd` at 300
+> chars and Claude prompts at 120. Raising those caps past ~3KB can corrupt the
+> log under concurrency.
 
 ## Fields
 
 | field | meaning |
 |---|---|
+| `v` | schema version (currently `1`); absent on pre-versioning events |
 | `id` | groups start/end; Claude sessions reuse `claude-<sid>` across turns |
 | `cmd` | command line / prompt / op name (**sanitized** — see PRIVACY.md) |
 | `cwd` | working directory (click-to-focus / jump target) |
