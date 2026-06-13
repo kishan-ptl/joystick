@@ -179,5 +179,5 @@ annoyances are the real v0.2.
 - UserDefaults seen-state written every 2s → only on focus change
 - joystick-redact.zsh assumed default zsh options (bash_rematch would silently
   break MATCH vars) → emulate -L zsh in both functions
-- Redaction test suite lived in /tmp → ~/.config/joystick/tests/redact-test.zsh
+- Redaction test suite lived in /tmp → ~/joystick/tests/redact-test.zsh
 - Swift concurrency: ttyInputWait/stallSecs nonisolated; build has 0 warnings

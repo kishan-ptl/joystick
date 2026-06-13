@@ -2,7 +2,7 @@
 # Retroactively apply the current redaction rules to the existing events log.
 # Leaves an unredacted backup at events.jsonl.bak — verify, then delete it.
 set -e
-source "$HOME/.config/joystick/joystick-redact.zsh"
+source "$HOME/joystick/joystick-redact.zsh"
 LOG="${XDG_STATE_HOME:-$HOME/.local/state}/joystick/events.jsonl"
 [[ -f $LOG ]] || { print "no log at $LOG"; exit 0 }
 

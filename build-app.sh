@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Build Joystick.app from Joystick.swift into ~/Applications.
 set -e
-DIR="$HOME/.config/joystick"
+DIR="$HOME/joystick"
 APP="$HOME/Applications/Joystick.app"
 
 mkdir -p "$APP/Contents/MacOS"

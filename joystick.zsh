@@ -12,7 +12,7 @@ mkdir -p "${JOYSTICK_LOG:h}"
 [[ -e $JOYSTICK_LOG ]] || : >> "$JOYSTICK_LOG"
 chmod 600 "$JOYSTICK_LOG" 2>/dev/null
 
-source "$HOME/.config/joystick/joystick-redact.zsh"
+source "$HOME/joystick/joystick-redact.zsh"
 
 # Opt-outs, set in ~/.zshrc before sourcing this file:
 #   JOYSTICK_NOLOG_DIRS=(~/secrets ~/work/client-x)  — never log in these trees

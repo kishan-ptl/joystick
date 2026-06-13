@@ -1,6 +1,6 @@
 #!/bin/zsh
 # joystick redaction test suite — run after any change to joystick-redact.zsh
-source ~/.config/joystick/joystick-redact.zsh
+source ~/joystick/joystick-redact.zsh
 pass=0; fail=0
 check() { # $1 input, $2 must-contain, $3 must-not-contain
   _joystick_redact "$1"

@@ -11,7 +11,7 @@ set -u
 LOG="${XDG_STATE_HOME:-$HOME/.local/state}/joystick/events.jsonl"
 mkdir -p "${LOG:h}"
 MIN_NOTIFY_SECS=30
-source "$HOME/.config/joystick/joystick-redact.zsh"
+source "$HOME/joystick/joystick-redact.zsh"
 
 input=$(cat)
 event=$(jq -r '.hook_event_name // empty' <<<"$input")

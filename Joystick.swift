@@ -1,7 +1,7 @@
 // Joystick — live dashboard of operations running across all terminal tabs.
 // Reads ~/.local/state/joystick/events.jsonl (written by joystick.zsh and
 // claude-hook.sh). Click a row to focus that Ghostty tab.
-// Build with ~/.config/joystick/build-app.sh
+// Build with ~/joystick/build-app.sh
 
 import SwiftUI
 import AppKit
@@ -212,7 +212,7 @@ final class Store: ObservableObject {
             seenAt[op.surface] = now.timeIntervalSince1970
             persistSeen()
         }
-        let script = NSString(string: "~/.config/joystick/joystick-focus.sh").expandingTildeInPath
+        let script = NSString(string: "~/joystick/joystick-focus.sh").expandingTildeInPath
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/zsh")
         p.arguments = [script, op.surface.isEmpty ? "-" : op.surface, op.cwd]
