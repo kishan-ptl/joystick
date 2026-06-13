@@ -81,6 +81,7 @@ final class Store: ObservableObject {
     static let doneWindowSecs = 6.0 * 3600
     static let externalTTL = 24.0 * 3600   // running `joystick log` ops dropped after this with no end
     static let maxDone = 20
+    static let maxDoneRetained = 2000   // incremental parse accumulates; cap retained finished ops
     static let historyCap = 3
     static let ignore: Set<String> = ["claude", "claude2", "vim", "nvim", "less", "man", "top", "htop", "tmux"]
     nonisolated static let stallSecs = 20.0
@@ -91,10 +92,12 @@ final class Store: ObservableObject {
     private var ttyStates: [String: TtyState] = [:]
     private var lastStallCheck = Date.distantPast
     private var notifiedWaiting: Set<String> = []
-    // Parsed log cache — re-parse only when (mtime, size) move, so the backstop
-    // tick and any spurious FS event cost almost nothing.
+    // Parsed log cache — re-parse only when (mtime, size) move, and then read
+    // only the bytes appended since lastReadOffset, folding each new event into
+    // the maps below. A full re-read happens only on rotation/truncation.
     private var lastLogMtime = Date.distantPast
     private var lastLogSize: UInt64 = .max
+    private var lastReadOffset: UInt64 = 0   // bytes of the log already folded in
     private var parsedOpen: [String: Op] = [:]
     private var parsedDone: [Op] = []
     private var lastPersistedFocus: String? = nil
@@ -343,6 +346,12 @@ final class Store: ObservableObject {
         try? p.run()
     }
 
+    // Incremental tail-parse: read only the bytes appended since last time and
+    // fold each new event into parsedOpen/parsedDone. The log is append-only, so
+    // steady-state cost is "parse the new line(s)", not "re-read 4000 lines" —
+    // and because we accumulate rather than re-window, a long-running op's row no
+    // longer vanishes when its `start` scrolls past the last-4000-line mark (now
+    // common, since every Claude tool use appends an `active` line).
     private func parseLogIfChanged() {
         let attrs = try? FileManager.default.attributesOfItem(atPath: logURL.path)
         let mtime = (attrs?[.modificationDate] as? Date) ?? .distantPast
@@ -351,43 +360,74 @@ final class Store: ObservableObject {
         lastLogMtime = mtime
         lastLogSize = size
 
-        guard let data = try? Data(contentsOf: logURL),
-              let text = String(data: data, encoding: .utf8) else {
-            parsedOpen = [:]; parsedDone = []
+        // Rotation/truncation (the log shrank or was replaced): re-read from top.
+        if size < lastReadOffset { lastReadOffset = 0; parsedOpen = [:]; parsedDone = [] }
+
+        guard let fh = try? FileHandle(forReadingFrom: logURL) else {
+            lastReadOffset = 0; parsedOpen = [:]; parsedDone = []
             return
         }
+        defer { try? fh.close() }
+        if lastReadOffset > 0 { try? fh.seek(toOffset: lastReadOffset) }
+        guard let chunk = try? fh.readToEnd(), !chunk.isEmpty else { return }
+
+        // Consume only up to the last newline; any trailing partial line stays in
+        // the file and is re-read next time. (Lines are atomic <PIPE_BUF appends,
+        // so this is belt-and-suspenders — but it keeps us robust against a
+        // future producer that isn't line-atomic.)
+        guard let lastNL = chunk.lastIndex(of: 0x0A) else { return }
+        let cold = (lastReadOffset == 0)
+        let completeLen = chunk.distance(from: chunk.startIndex, to: lastNL) + 1
+        let complete = chunk.prefix(completeLen)
+        lastReadOffset += UInt64(completeLen)
+
         let decoder = JSONDecoder()
-        var open: [String: Op] = [:]
-        var done: [Op] = []
-        for line in text.split(separator: "\n").suffix(4000) {
-            guard let e = try? decoder.decode(RawEvent.self, from: Data(line.utf8)) else { continue }
-            if e.ev == "start" {
-                // Prefer the explicit kind; fall back to the old tty sentinels
-                // for events written before the kind field existed.
-                let kind = e.kind ?? (e.tty == "claude" ? "claude"
-                                      : e.tty == "cli" ? "external" : "shell")
-                open[e.id] = Op(key: e.id, cmd: e.cmd ?? "?", cwd: e.cwd ?? "",
-                                tty: e.tty ?? "", surface: e.surface ?? "", kind: kind,
-                                pid: e.pid ?? -1, start: e.ts)
-            } else if e.ev == "end", var op = open.removeValue(forKey: e.id) {
+        var lines = Array(complete.split(separator: 0x0A, omittingEmptySubsequences: true))
+        if cold { lines = Array(lines.suffix(4000)) }   // bound the initial backfill
+        for line in lines {
+            if let e = try? decoder.decode(RawEvent.self, from: Data(line)) { applyEvent(e) }
+        }
+        if parsedDone.count > Self.maxDoneRetained {
+            parsedDone.removeFirst(parsedDone.count - Self.maxDoneRetained)
+        }
+    }
+
+    // Fold one event into the running state. Identical semantics whether applied
+    // incrementally or over a full re-read — it's a left-fold over the log.
+    private func applyEvent(_ e: RawEvent) {
+        switch e.ev {
+        case "start":
+            // Prefer the explicit kind; fall back to the old tty sentinels for
+            // events written before the kind field existed.
+            let kind = e.kind ?? (e.tty == "claude" ? "claude"
+                                  : e.tty == "cli" ? "external" : "shell")
+            parsedOpen[e.id] = Op(key: e.id, cmd: e.cmd ?? "?", cwd: e.cwd ?? "",
+                                  tty: e.tty ?? "", surface: e.surface ?? "", kind: kind,
+                                  pid: e.pid ?? -1, start: e.ts)
+        case "end":
+            if var op = parsedOpen.removeValue(forKey: e.id) {
                 op.endTs = e.ts
                 op.exitCode = e.exit ?? 0
                 op.dur = e.dur ?? max(0, e.ts - op.start)
-                done.append(op)
-            } else if e.ev == "waiting", var op = open[e.id] {
+                parsedDone.append(op)
+            }
+        case "waiting":
+            if var op = parsedOpen[e.id] {
                 op.waitingSince = e.ts
                 op.waitingMsg = e.msg
                 op.activity = nil          // blocked on you, not running a tool
-                open[e.id] = op
-            } else if e.ev == "active", var op = open[e.id] {
+                parsedOpen[e.id] = op
+            }
+        case "active":
+            if var op = parsedOpen[e.id] {
                 op.waitingSince = nil
                 op.waitingMsg = nil
                 op.activity = e.act        // live "what it's doing now"
-                open[e.id] = op
+                parsedOpen[e.id] = op
             }
+        default:
+            break
         }
-        parsedOpen = open
-        parsedDone = done
     }
 
     private func refreshTtyStates(ttys: Set<String>, nowTs: Double) {
