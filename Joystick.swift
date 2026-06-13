@@ -375,12 +375,25 @@ final class Store: ObservableObject {
             seenAt[op.surface] = now.timeIntervalSince1970
             persistSeen()
         }
-        let script = NSString(string: "~/joystick/joystick-focus.sh").expandingTildeInPath
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        p.arguments = [script, op.surface.isEmpty ? "-" : op.surface, op.cwd]
+        p.arguments = [Self.focusScript, op.surface.isEmpty ? "-" : op.surface, op.cwd]
         try? p.run()
     }
+
+    // Locate joystick-focus.sh without assuming the dev's ~/joystick checkout:
+    // the copy bundled in the app works at any install location; fall back to
+    // $JOYSTICK_HOME (where install.sh copies it) and finally the dev repo.
+    // First existing path wins; the last candidate is the bare fallback.
+    static let focusScript: String = {
+        let home = ProcessInfo.processInfo.environment["JOYSTICK_HOME"] ?? "~/.config/joystick"
+        let candidates = [
+            Bundle.main.resourcePath.map { $0 + "/joystick-focus.sh" },
+            (home as NSString).expandingTildeInPath + "/joystick-focus.sh",
+            NSString(string: "~/joystick/joystick-focus.sh").expandingTildeInPath,
+        ].compactMap { $0 }
+        return candidates.first { FileManager.default.fileExists(atPath: $0) } ?? candidates.last!
+    }()
 
     // Incremental tail-parse: read only the bytes appended since last time and
     // fold each new event into parsedOpen/parsedDone. The log is append-only, so
