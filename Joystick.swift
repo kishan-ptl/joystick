@@ -82,14 +82,15 @@ final class Store: ObservableObject {
     static let historyCap = 3
     static let ignore: Set<String> = ["claude", "claude2", "vim", "nvim", "less", "man", "top", "htop", "tmux"]
     nonisolated static let stallSecs = 20.0
+    static let backstopSecs = 10.0   // safety-net reload cadence; the FS watch does the real work
 
     enum TtyState: Sendable { case waiting(Double), service }
 
     private var ttyStates: [String: TtyState] = [:]
     private var lastStallCheck = Date.distantPast
     private var notifiedWaiting: Set<String> = []
-    // Parsed log cache — the file only changes a few times a minute, but
-    // reload() ticks every second; re-parse only when (mtime, size) move.
+    // Parsed log cache — re-parse only when (mtime, size) move, so the backstop
+    // tick and any spurious FS event cost almost nothing.
     private var lastLogMtime = Date.distantPast
     private var lastLogSize: UInt64 = .max
     private var parsedOpen: [String: Op] = [:]
@@ -100,19 +101,35 @@ final class Store: ObservableObject {
     private var lastFocusPoll = Date.distantPast
     // surface id -> last time it was focused while Ghostty was frontmost
     private var seenAt: [String: Double] = [:]
-    private var timer: Timer?
+    // Refresh is event-driven (see startWatching): an FS watch on the log fires
+    // reload() within ~tens of ms of a new event, instead of a 1 Hz poll. The
+    // active tick runs at 1 Hz only while something is running (to advance the
+    // clock and cross time thresholds); a slow backstop covers missed events and
+    // log rotation. At rest, none of these fire.
+    private var logWatcher: DispatchSourceFileSystemObject?
+    private var reloadDebounce: DispatchWorkItem?
+    private var activeTick: Timer?
+    private var backstopTimer: Timer?
 
     init() {
         if let d = UserDefaults.standard.dictionary(forKey: "seenAt") as? [String: Double] {
             seenAt = d
         }
-        // Self-drive the refresh so the menubar stays live even when no window
-        // is open. (Previously the 1s timer lived in ContentView and only
-        // ticked while a window was visible.)
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+        reload()
+        // Watch the log instead of polling it: near-instant pickup of new
+        // sessions and state changes, and ~zero wakeups while the log is quiet.
+        startWatching()
+        // Safety net for missed FS events, the log being created after launch,
+        // and rotation gaps — far cheaper than the old always-on 1 Hz poll.
+        backstopTimer = Timer.scheduledTimer(withTimeInterval: Self.backstopSecs, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.reload() }
         }
-        reload()
+    }
+
+    deinit {
+        logWatcher?.cancel()
+        activeTick?.invalidate()
+        backstopTimer?.invalidate()
     }
 
     private var logURL: URL {
@@ -227,6 +244,71 @@ final class Store: ObservableObject {
 
         let unseenCount = idle.filter { $0.current.unseen }.count
         NSApp.dockTile.badgeLabel = unseenCount > 0 ? "\(unseenCount)" : nil
+
+        // Run the 1 Hz tick only while something is (or is about to become)
+        // running — it advances elapsed-time labels, crosses the minRunningSecs
+        // visibility threshold, re-evaluates the stall heuristic, and drops rows
+        // whose pid died without an `end`. With no live open op there's nothing
+        // to animate, so the tick is torn down and the app idles silently; the
+        // FS watch alone wakes it when the next event lands.
+        let liveOpen = parsedOpen.values.contains {
+            $0.isExternal ? (nowTs - $0.start < Self.externalTTL) : alive($0.pid)
+        }
+        updateActiveTick(liveOpen)
+    }
+
+    // MARK: - Event-driven refresh
+
+    // Watch the log for appends and fire a (debounced) reload. A vnode source on
+    // the file fd delivers .write/.extend within ~tens of ms. On rotation (the
+    // log is rewritten via `mv` past 5MB) the .rename/.delete event re-arms the
+    // watch on the replacement file; if the log doesn't exist yet, retry until
+    // the emitters create it.
+    private func startWatching() {
+        logWatcher?.cancel()
+        logWatcher = nil
+        let fd = open(logURL.path, O_EVTONLY)
+        guard fd >= 0 else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.startWatching() }
+            return
+        }
+        let src = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write, .extend, .delete, .rename, .revoke],
+            queue: DispatchQueue.global(qos: .utility))
+        src.setEventHandler { [weak self] in
+            let rotated = !src.data.intersection([.delete, .rename, .revoke]).isEmpty
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if rotated { self.startWatching() }   // re-arm on the replacement file
+                self.scheduleReload()
+            }
+        }
+        src.setCancelHandler { close(fd) }
+        logWatcher = src
+        src.resume()
+    }
+
+    // Coalesce a burst of appends (many sessions starting at once) into one
+    // reparse ~40ms later, instead of one per line.
+    private func scheduleReload() {
+        reloadDebounce?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.reload() }
+        reloadDebounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: work)
+    }
+
+    // Start/stop the 1 Hz display+threshold tick. Idempotent; torn down at rest.
+    private func updateActiveTick(_ active: Bool) {
+        if active {
+            guard activeTick == nil else { return }
+            activeTick = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.reload() }
+            }
+        } else {
+            activeTick?.invalidate()
+            activeTick = nil
+        }
     }
 
     func focus(_ op: Op) {
