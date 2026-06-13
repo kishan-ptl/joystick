@@ -219,19 +219,20 @@ for d in done[::-1]:  # newest first
 done = [grouped[k] for k in gorder][:MAX_DONE]
 
 # --- menubar title ---
+# Compact: glyph + count only (full detail lives in the dropdown). State glyph
+# is preserved (principle #5) so ✋ needs-you / ▶ working / ◉ serving still read
+# at a glance; idle shows the 🕹 brand mark.
 waiting_n = sum(1 for s in running if is_waiting(s))
 if waiting_n:
-    w = next(s for s in running if is_waiting(s))
-    print(f"✋ {waiting_n} · {short(w['cmd'], 18)}")
+    print(f"✋ {waiting_n}")
 elif running:
     nonsvc = [s for s in running if not s.get("service")]
     if nonsvc:
-        oldest = nonsvc[0]
-        print(f"▶ {len(running)} · {short(oldest['cmd'], 18)} {fmt(now - oldest['ts'])}")
+        print(f"▶ {len(running)}")
     else:
         print(f"◉ {len(running)}")
 else:
-    print("⌁")
+    print("🕹")
 
 print("---")
 
