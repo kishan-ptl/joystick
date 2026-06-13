@@ -745,16 +745,14 @@ struct GroupRow: View {
     let action: () -> Void
 
     var body: some View {
-        // Not a Button: SwiftUI text selection can't work inside one (the button
-        // swallows the drag). Instead the text is selectable — drag to highlight,
-        // ⌘C to copy — and a *tap* focuses the tab. We can't use a TapGesture for
-        // the tap: macOS text selection installs its own mouse handling on the
-        // glyphs and preempts TapGesture when the click lands on text (i.e. on the
-        // command, which fills most of the row), so clicking the text selected
-        // instead of focusing. A simultaneous zero-distance DragGesture DOES get
-        // the mouse-up over selectable text: if it ended without moving it was a
-        // click → focus; if it moved it was a selection drag → leave it to the
-        // text. The 6pt slop swallows sub-pixel jitter on a plain click.
+        // One-tap focus is THE feature, so it has to be rock-solid. We tried
+        // making the row's text selectable (drag to highlight, ⌘C to copy) while
+        // a gesture handled the tap, but macOS text selection installs its own
+        // mouse handling on the glyphs and swallows the click wherever it lands
+        // on text — which is most of the row — so clicking selected instead of
+        // focusing. No simultaneous/high-priority gesture beats it reliably.
+        // So: text is NOT selectable; the whole row is a plain click → focus,
+        // and copy lives in the right-click menu (whole command / directory).
         VStack(alignment: .leading, spacing: 1) {
             OpRow(op: group.current, nowTs: nowTs)
             ForEach(group.history) { op in
@@ -774,12 +772,9 @@ struct GroupRow: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .textSelection(.enabled)
         .contentShape(Rectangle())
-        .simultaneousGesture(DragGesture(minimumDistance: 0).onEnded { v in
-            if hypot(v.translation.width, v.translation.height) < 6 { action() }
-        })
-        .help("Click to focus this tab in Ghostty · drag to select · right-click to copy")
+        .onTapGesture { action() }
+        .help("Click to focus this tab in Ghostty · right-click to copy")
         .contextMenu { copyMenu(for: group.current) }
     }
 
