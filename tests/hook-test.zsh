@@ -40,6 +40,16 @@ fire '{"hook_event_name":"UserPromptSubmit","session_id":"s4","cwd":"/tmp","prom
 fire '{"hook_event_name":"PostToolUse","session_id":"s4","cwd":"/tmp","tool_name":"Edit","tool_input":{"file_path":"/a/b/foo.swift"}}'
 check "activity captured" "$(grep '"id":"claude-s4"' "$LOG" | grep '"ev":"active"' | jq -r '.act' | tail -1)" "Edit foo.swift"
 
+# StopFailure closes the turn with exit 1 (honest failure vs the old always-0).
+fire '{"hook_event_name":"UserPromptSubmit","session_id":"s5","cwd":"/tmp","prompt":"go"}'
+fire '{"hook_event_name":"StopFailure","session_id":"s5","cwd":"/tmp"}'
+check "StopFailure -> exit 1" "$(grep '"id":"claude-s5"' "$LOG" | grep '"ev":"end"' | jq -r '.exit' | tail -1)" "1"
+
+# PostToolUseFailure surfaces a tool error as the activity.
+fire '{"hook_event_name":"UserPromptSubmit","session_id":"s6","cwd":"/tmp","prompt":"go"}'
+fire '{"hook_event_name":"PostToolUseFailure","session_id":"s6","cwd":"/tmp","tool_name":"Bash"}'
+check "tool failure -> activity" "$(grep '"id":"claude-s6"' "$LOG" | grep '"ev":"active"' | jq -r '.act' | tail -1)" "⚠ Bash failed"
+
 # Every emitted event carries the schema version.
 check "events are v:1" "$(grep -c '"v":1' "$LOG")" "$(grep -c '"ev":' "$LOG")"
 

@@ -1,11 +1,12 @@
 #!/bin/zsh
-# claude-hook.sh — Claude Code hook handler for joystick.
-# Wired to UserPromptSubmit / Stop / Notification in ~/.claude/settings.json.
+# claude-hook.sh — Claude Code hook handler for joystick. Wired in
+# ~/.claude/settings.json to: UserPromptSubmit, Stop, StopFailure, Notification,
+# PostToolUse, PostToolUseFailure.
 #
-# UserPromptSubmit -> joystick "start" event (turn shows as running in Joystick)
-# Stop             -> joystick "end" event + desktop notification if the turn
-#                     ran >= MIN_NOTIFY_SECS and Ghostty isn't frontmost
-# Notification     -> desktop notification (Claude waiting on permission/input)
+# UserPromptSubmit      -> "start" (turn shows as running)
+# Stop / StopFailure    -> "end" (exit 0 / 1) + done / failed desktop notification
+# Notification          -> "waiting" (blocked on you) + notification
+# PostToolUse(Failure)  -> "active" carrying live activity (or "⚠ tool failed")
 set -u
 
 LOG="${XDG_STATE_HOME:-$HOME/.local/state}/joystick/events.jsonl"
@@ -46,6 +47,25 @@ notify() {  # $1 = title, $2 = message
     -e 'end run' "$1" "$2" 2>/dev/null
 }
 
+# Close this session's open turn (if any) with the given exit code. Decides
+# open/closed from start/end lines only — a turn that went start→waiting→active
+# (you approved a permission prompt) has `active` last; including it would
+# wrongly skip the end + notification, exactly when you stepped away. Stop also
+# fires on /clear/resume/compact, which have no open turn.
+close_turn() {  # $1 = exit code  $2 = notify title  $3 = notify verb
+  rm -f "${LOG:h}/waiting-$sid"
+  local last start_ts elapsed
+  last=$(tail -n 2000 "$LOG" 2>/dev/null | grep -F "\"id\":\"$id\"" | grep -E '"ev":"(start|end)"' | tail -1)
+  [[ $last == *'"ev":"start"'* ]] || return 0
+  start_ts=$(jq -r '.ts // 0' <<<"$last")
+  elapsed=$(( now - start_ts ))
+  jq -cn --arg id "$id" --argjson ts "$now" --argjson dur "$elapsed" --argjson ex "$1" \
+    '{v:1,ev:"end",id:$id,exit:$ex,dur:$dur,ts:$ts}' >> "$LOG"
+  if (( elapsed >= MIN_NOTIFY_SECS )) && ! ghostty_frontmost; then
+    notify "$2" "$3 after $((elapsed / 60))m$((elapsed % 60))s in ${cwd:t}"
+  fi
+}
+
 case $event in
   UserPromptSubmit)
     rm -f "${LOG:h}/waiting-$sid"
@@ -77,23 +97,8 @@ case $event in
       --arg surface "$surface" --argjson pid "$cpid" --argjson ts "$now" \
       '{v:1,kind:"claude",ev:"start",id:$id,cmd:$cmd,cwd:$cwd,pid:$pid,tty:"",surface:$surface,ts:$ts}' >> "$LOG"
     ;;
-  Stop)
-    rm -f "${LOG:h}/waiting-$sid"
-    # Only act if this session's turn is still open. Decide open/closed from
-    # start/end lines ONLY: a turn that went start→waiting→active (you approved
-    # a permission prompt) has `active` as its last line — including waiting/
-    # active here would wrongly skip the end + done-notification, exactly when
-    # you stepped away. Stop also fires on /clear/resume/compact (no open turn).
-    last=$(tail -n 2000 "$LOG" 2>/dev/null | grep -F "\"id\":\"$id\"" | grep -E '"ev":"(start|end)"' | tail -1)
-    [[ $last == *'"ev":"start"'* ]] || exit 0
-    start_ts=$(jq -r '.ts // 0' <<<"$last")
-    elapsed=$(( now - start_ts ))
-    jq -cn --arg id "$id" --argjson ts "$now" --argjson dur "$elapsed" \
-      '{v:1,ev:"end",id:$id,exit:0,dur:$dur,ts:$ts}' >> "$LOG"
-    if (( elapsed >= MIN_NOTIFY_SECS )) && ! ghostty_frontmost; then
-      notify "Claude Code — done" "Finished after $((elapsed / 60))m$((elapsed % 60))s in ${cwd:t}"
-    fi
-    ;;
+  Stop)         close_turn 0 "Claude Code — done"   "Finished" ;;
+  StopFailure)  close_turn 1 "Claude Code — failed" "Failed"   ;;
   Notification)
     # Claude is blocked on the user (permission prompt or idle). Mark the open
     # turn as waiting; the next PostToolUse means we're unblocked again.
@@ -135,6 +140,13 @@ case $event in
       jq -cn --arg id "$id" --arg act "$act" --argjson ts "$now" \
         '{v:1,ev:"active",id:$id,act:$act,ts:$ts}' >> "$LOG"
     fi
+    ;;
+  PostToolUseFailure)
+    # A tool errored — surface it as the live activity so the row shows trouble.
+    tool=$(jq -r '.tool_name // empty' <<<"$input")
+    [[ -n $tool ]] || exit 0
+    jq -cn --arg id "$id" --arg act "⚠ $tool failed" --argjson ts "$now" \
+      '{v:1,ev:"active",id:$id,act:$act,ts:$ts}' >> "$LOG"
     ;;
 esac
 exit 0
