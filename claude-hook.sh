@@ -47,6 +47,16 @@ notify() {  # $1 = title, $2 = message
     -e 'end run' "$1" "$2" 2>/dev/null
 }
 
+# Resolve this turn's transcript file: the hook-provided path, else the
+# conventional ~/.claude/projects/<cwd>/<sid>.jsonl location. Echoes the path,
+# or nothing if neither exists.
+claude_transcript() {
+  local tpath
+  tpath=$(jq -r '.transcript_path // empty' <<<"$input")
+  [[ -f $tpath ]] || tpath="$HOME/.claude/projects/${cwd//\//-}/$sid.jsonl"
+  [[ -f $tpath ]] && print -r -- "$tpath"
+}
+
 # Close this session's open turn (if any) with the given exit code. Decides
 # open/closed from start/end lines only — a turn that went start→waiting→active
 # (you approved a permission prompt) has `active` last; including it would
@@ -54,27 +64,37 @@ notify() {  # $1 = title, $2 = message
 # fires on /clear/resume/compact, which have no open turn.
 close_turn() {  # $1 = exit code  $2 = notify title  $3 = notify verb
   rm -f "${LOG:h}/waiting-$sid"
-  local last start_ts elapsed
+  local last start_ts elapsed tpath summary=""
   last=$(tail -n 2000 "$LOG" 2>/dev/null | grep -F "\"id\":\"$id\"" | grep -E '"ev":"(start|end)"' | tail -1)
   [[ $last == *'"ev":"start"'* ]] || return 0
   start_ts=$(jq -r '.ts // 0' <<<"$last")
   elapsed=$(( now - start_ts ))
-  jq -cn --arg id "$id" --argjson ts "$now" --argjson dur "$elapsed" --argjson ex "$1" \
-    '{v:1,ev:"end",id:$id,exit:$ex,dur:$dur,ts:$ts}' >> "$LOG"
+  # Claude's closing blurb = the last assistant text block in the transcript;
+  # show it on the finished row so you can see what it said without switching
+  # back. Flatten to one line, then redact + cap like every other free-text
+  # field so the log line stays < PIPE_BUF and never stores a secret. Empty
+  # (turn ended on a tool call / no final text) → omit msg; row looks as before.
+  tpath=$(claude_transcript)
+  if [[ -n $tpath ]]; then
+    summary=$(tail -n 200 "$tpath" | jq -rc 'select(.type=="assistant")|.message.content[]?|select(.type=="text")|.text' 2>/dev/null | tail -1)
+    summary=${summary//[$'\n\t\r']/ }
+    _joystick_redact "$summary"; summary=${REPLY[1,240]}
+  fi
+  jq -cn --arg id "$id" --arg msg "$summary" --argjson ts "$now" --argjson dur "$elapsed" --argjson ex "$1" \
+    '{v:1,ev:"end",id:$id,exit:$ex,dur:$dur,ts:$ts} + (if $msg != "" then {msg:$msg} else {} end)' >> "$LOG"
   if (( elapsed >= MIN_NOTIFY_SECS )) && ! ghostty_frontmost; then
     notify "$2" "$3 after $((elapsed / 60))m$((elapsed % 60))s in ${cwd:t}"
   fi
-  emit_meta
+  emit_meta "$tpath"
 }
 
 # Emit session metadata from the Claude transcript: topic title, model,
 # permission mode, and context-window fill (the latest request's token count =
 # input + cache_read + cache_creation). Runs on turn close (async).
-emit_meta() {
-  local tpath title mode model ctx
-  tpath=$(jq -r '.transcript_path // empty' <<<"$input")
-  [[ -f $tpath ]] || tpath="$HOME/.claude/projects/${cwd//\//-}/$sid.jsonl"
-  [[ -f $tpath ]] || return 0
+# $1 = the transcript path close_turn already resolved (empty if none).
+emit_meta() {  # $1 = transcript path (may be empty)
+  local tpath=$1 title mode model ctx
+  [[ -n $tpath ]] || return 0
   title=$(grep -F '"type":"ai-title"' "$tpath" 2>/dev/null | tail -1 | jq -r '.aiTitle // empty' 2>/dev/null)
   mode=$(grep -F '"type":"permission-mode"' "$tpath" 2>/dev/null | tail -1 | jq -r '.permissionMode // empty' 2>/dev/null)
   model=$(tail -100 "$tpath" | jq -r 'select(.message.model != null) | .message.model' 2>/dev/null | tail -1)
