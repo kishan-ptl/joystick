@@ -147,6 +147,12 @@ case $event in
     jq -cn --arg id "$id" --arg cmd "🤖 ${prompt[1,120]}" --arg cwd "$cwd" \
       --arg surface "$surface" --argjson pid "$cpid" --argjson ts "$now" \
       '{v:1,kind:"claude",ev:"start",id:$id,cmd:$cmd,cwd:$cwd,pid:$pid,tty:"",surface:$surface,ts:$ts}' >> "$LOG"
+    # Refresh session meta at turn START too (backgrounded, so no turn-start
+    # latency). A /rename fires no hook, so without this the new name only lands
+    # on the next turn CLOSE; this makes it show on your next prompt.
+    tp=$(jq -r '.transcript_path // empty' <<<"$input")
+    [[ -f $tp ]] || tp="$HOME/.claude/projects/${cwd//\//-}/$sid.jsonl"
+    emit_meta "$tp" &!
     ;;
   Stop)         close_turn 0 "Claude Code — done"   "Finished" ;;
   StopFailure)  close_turn 1 "Claude Code — failed" "Failed"   ;;
