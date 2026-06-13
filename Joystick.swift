@@ -575,6 +575,11 @@ func tilde(_ path: String) -> String {
     return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
 }
 
+func copyToPasteboard(_ s: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(s, forType: .string)
+}
+
 // MARK: - Views
 
 // Claude's brand orange (#D97757). Used for the thinking sparkle and the
@@ -698,13 +703,28 @@ struct GroupRow: View {
                             .lineLimit(1)
                         Spacer(minLength: 0)
                     }
+                    .contentShape(Rectangle())
+                    // Right-clicking a specific history line copies that line's
+                    // command (innermost context menu wins over the row's).
+                    .contextMenu { copyMenu(for: op) }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("Click to focus this tab in Ghostty")
+        .help("Click to focus this tab in Ghostty · right-click to copy")
+        .contextMenu { copyMenu(for: group.current) }
+    }
+
+    // Right-click → copy. Command first (the row's main text), then its
+    // directory. cmd is copied as shown (Claude rows keep their 🤖 prefix).
+    @ViewBuilder
+    private func copyMenu(for op: Op) -> some View {
+        Button { copyToPasteboard(op.cmd) } label: { Label("Copy command", systemImage: "doc.on.doc") }
+        if !op.cwd.isEmpty {
+            Button { copyToPasteboard(op.cwd) } label: { Label("Copy directory", systemImage: "folder") }
+        }
     }
 
     private func historyLine(_ op: Op) -> String {
