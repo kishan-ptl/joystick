@@ -499,7 +499,7 @@ struct OpRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(op.cmd)
                     .font(.system(.body, design: .monospaced))
-                    .lineLimit(1)
+                    .lineLimit(2)
                 Text(subtitle)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
@@ -592,7 +592,7 @@ struct GroupRow: View {
 
 struct ContentView: View {
     @EnvironmentObject var store: Store
-    @State private var floatOnTop = false
+    @State private var floatOnTop = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -601,7 +601,13 @@ struct ContentView: View {
             opList
         }
         .frame(minWidth: 400, minHeight: 320)
-        .onAppear { store.reload() }
+        .onAppear {
+            store.reload()
+            // Apply the default pin state — onChange only fires on a *change*,
+            // so without this the toggle would read "on" while windows stayed
+            // at .normal until the first manual toggle.
+            for w in NSApp.windows { w.level = floatOnTop ? .floating : .normal }
+        }
         .onChange(of: floatOnTop) { _, pinned in
             for w in NSApp.windows { w.level = pinned ? .floating : .normal }
         }
