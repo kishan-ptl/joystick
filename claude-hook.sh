@@ -40,6 +40,7 @@ ghostty_frontmost() {
 }
 
 notify() {  # $1 = title, $2 = message
+  [[ -n ${JOYSTICK_NO_NOTIFY:-} ]] && return 0   # silence (used by tests)
   osascript -e 'on run argv' \
     -e 'display notification (item 2 of argv) with title (item 1 of argv) sound name "Glass"' \
     -e 'end run' "$1" "$2" 2>/dev/null
@@ -67,9 +68,12 @@ case $event in
     ;;
   Stop)
     rm -f "${LOG:h}/waiting-$sid"
-    # Only act if the most recent event for this session is an open "start" —
-    # Stop also fires on /clear, resume, and compact, which have no turn to close.
-    last=$(grep -F "\"id\":\"$id\"" "$LOG" 2>/dev/null | tail -1)
+    # Only act if this session's turn is still open. Decide open/closed from
+    # start/end lines ONLY: a turn that went start→waiting→active (you approved
+    # a permission prompt) has `active` as its last line — including waiting/
+    # active here would wrongly skip the end + done-notification, exactly when
+    # you stepped away. Stop also fires on /clear/resume/compact (no open turn).
+    last=$(tail -n 2000 "$LOG" 2>/dev/null | grep -F "\"id\":\"$id\"" | grep -E '"ev":"(start|end)"' | tail -1)
     [[ $last == *'"ev":"start"'* ]] || exit 0
     start_ts=$(jq -r '.ts // 0' <<<"$last")
     elapsed=$(( now - start_ts ))
