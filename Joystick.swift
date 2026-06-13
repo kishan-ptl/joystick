@@ -887,7 +887,7 @@ struct ContentView: View {
             Text(parts.isEmpty ? "Idle" : parts.joined(separator: " · "))
                 .font(.system(.subheadline, design: .rounded).weight(.semibold))
             Spacer()
-            Text("⌘ \(store.commandsToday) today")
+            Text("❯ \(store.commandsToday) today")
                 .font(.system(.caption, design: .rounded))
                 .foregroundStyle(.secondary)
                 .help("Shell commands + Claude turns started today")
