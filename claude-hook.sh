@@ -12,7 +12,12 @@ set -u
 LOG="${XDG_STATE_HOME:-$HOME/.local/state}/joystick/events.jsonl"
 mkdir -p "${LOG:h}"
 MIN_NOTIFY_SECS=30
-source "$HOME/joystick/joystick-redact.zsh"
+# Source our shared sanitizer from our OWN directory (this hook is executed by
+# Claude from $JOYSTICK_HOME when installed, or ~/joystick in the dev repo).
+_jdir=${0:A:h}
+[[ -r $_jdir/joystick-redact.zsh ]] || _jdir=${JOYSTICK_HOME:-$HOME/.config/joystick}
+[[ -r $_jdir/joystick-redact.zsh ]] || _jdir=$HOME/joystick
+source "$_jdir/joystick-redact.zsh"
 
 input=$(cat)
 event=$(jq -r '.hook_event_name // empty' <<<"$input")

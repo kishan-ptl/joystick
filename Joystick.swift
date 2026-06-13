@@ -902,6 +902,19 @@ struct GroupRow: View {
 struct ContentView: View {
     @EnvironmentObject var store: Store
     @State private var floatOnTop = true
+    @State private var copiedPrompt = false
+
+    // First-run onboarding without a wizard: the user pastes this into Claude
+    // Code, which runs the bundled installer (shell + Claude hooks). Claude
+    // adapts to their environment and explains the diffs — the onboarding UI we
+    // don't have to build. install.sh ships in the app bundle's Resources.
+    static var onboardingPrompt: String {
+        let installer = Bundle.main.resourcePath.map { $0 + "/install.sh" } ?? "~/joystick/install.sh"
+        return "Set up Joystick on this Mac: run the installer at \"\(installer)\" — "
+            + "it wires up the zsh shell hook and Claude Code hooks, is idempotent, and "
+            + "backs up every file it edits. Then tell me in one line what it changed and "
+            + "how to undo it."
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -942,6 +955,17 @@ struct ContentView: View {
                 .font(.system(.caption, design: .rounded))
                 .foregroundStyle(.secondary)
                 .help("Shell commands + Claude turns started today")
+            Button {
+                copyToPasteboard(Self.onboardingPrompt)
+                copiedPrompt = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copiedPrompt = false }
+            } label: {
+                Label(copiedPrompt ? "Copied — paste into Claude" : "Set up",
+                      systemImage: copiedPrompt ? "checkmark" : "wand.and.stars")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help("Copy a prompt that installs Joystick's shell + Claude hooks — paste it into Claude Code")
             Toggle("Pin", isOn: $floatOnTop)
                 .toggleStyle(.switch)
                 .controlSize(.mini)

@@ -12,7 +12,15 @@ mkdir -p "${JOYSTICK_LOG:h}"
 [[ -e $JOYSTICK_LOG ]] || : >> "$JOYSTICK_LOG"
 chmod 600 "$JOYSTICK_LOG" 2>/dev/null
 
-source "$HOME/joystick/joystick-redact.zsh"
+# Source our shared sanitizer from our OWN directory, so this works whether
+# we're installed to $JOYSTICK_HOME (~/.config/joystick) or run from the dev
+# repo (~/joystick). ${0:A:h} is this file's dir; fall back if shell options
+# hid argzero. (Top-level: no `local`, so tidy up the temp var after.)
+_joystick_dir=${0:A:h}
+[[ -r $_joystick_dir/joystick-redact.zsh ]] || _joystick_dir=${JOYSTICK_HOME:-$HOME/.config/joystick}
+[[ -r $_joystick_dir/joystick-redact.zsh ]] || _joystick_dir=$HOME/joystick
+source "$_joystick_dir/joystick-redact.zsh"
+unset _joystick_dir
 
 # Opt-outs, set in ~/.zshrc before sourcing this file:
 #   JOYSTICK_NOLOG_DIRS=(~/secrets ~/work/client-x)  — never log in these trees
