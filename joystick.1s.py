@@ -219,23 +219,22 @@ for d in done[::-1]:  # newest first
 done = [grouped[k] for k in gorder][:MAX_DONE]
 
 # --- menubar title ---
-# A single dot; its color is the state, and it blinks (a ~1s pulse driven by the
-# .1s refresh + wall-clock parity) while something is active, so it catches the
-# eye only when it should. Pulse is bright<->dim, not on<->off, so the item keeps
-# constant width and neighbouring menubar icons never shift.
-#   blinking yellow = a terminal needs you · blinking white = work in progress
-#   · steady green = serving · steady dim = idle.  Full detail is in the dropdown.
+# A single dot; its color is the state. Only the needs-you state animates (a
+# gentle ~1s amber pulse via the .1s refresh + wall-clock parity); everything
+# else is static, so the bar stays calm until something actually needs you.
+#   amber pulse = a terminal needs you · steady white = working ·
+#   steady green = serving · steady dim = idle.  Full detail is in the dropdown.
 DOT = "●"
 YELLOW, WHITE, GREEN, DIM = "#F2B705", "#FFFFFF", "#46A65A", "#555555"
-on = int(time.time()) % 2 == 0  # blink phase
+on = int(time.time()) % 2 == 0  # blink phase — used ONLY for needs-you
 if any(is_waiting(s) for s in running):
-    print(f"{DOT} | color={YELLOW if on else DIM}")
+    print(f"{DOT} | color={YELLOW if on else DIM}")   # the only thing that animates
 elif any(not s.get("service") for s in running):
-    print(f"{DOT} | color={WHITE if on else DIM}")
+    print(f"{DOT} | color={WHITE}")                   # working — static
 elif running:
-    print(f"{DOT} | color={GREEN}")
+    print(f"{DOT} | color={GREEN}")                   # serving — static
 else:
-    print(f"{DOT} | color={DIM}")
+    print(f"{DOT} | color={DIM}")                     # idle — static
 
 print("---")
 
