@@ -76,6 +76,7 @@ final class Store: ObservableObject {
     @Published var activeGroups: [SurfaceGroup] = []
     @Published var idleGroups: [SurfaceGroup] = []
     @Published var now = Date()
+    @Published var commandsToday = 0   // shell + Claude turns started today (local time)
 
     static let minRunningSecs = 5.0
     static let minDoneSecs = 10.0
@@ -116,11 +117,18 @@ final class Store: ObservableObject {
     private var reloadDebounce: DispatchWorkItem?
     private var activeTick: Timer?
     private var backstopTimer: Timer?
+    // Daily command tally (shell + Claude turns started today, local time). Driven
+    // incrementally as starts are folded; recomputed from the log only on a day
+    // change (backfill), and persisted so it survives restarts and log rotation.
+    private var tallyDayStart: TimeInterval = 0
+    private var needsBackfill = false
 
     init() {
         if let d = UserDefaults.standard.dictionary(forKey: "seenAt") as? [String: Double] {
             seenAt = d
         }
+        commandsToday = UserDefaults.standard.integer(forKey: "commandsToday")
+        tallyDayStart = UserDefaults.standard.double(forKey: "tallyDayStart")
         reload()
         // Watch the log instead of polling it: near-instant pickup of new
         // sessions and state changes, and ~zero wakeups while the log is quiet.
@@ -148,6 +156,7 @@ final class Store: ObservableObject {
     func reload() {
         now = Date()
         let nowTs = now.timeIntervalSince1970
+        rolloverTallyIfNeeded()
         parseLogIfChanged()
 
         var running = parsedOpen.values
@@ -383,14 +392,48 @@ final class Store: ObservableObject {
         lastReadOffset += UInt64(completeLen)
 
         let decoder = JSONDecoder()
-        var lines = Array(complete.split(separator: 0x0A, omittingEmptySubsequences: true))
-        if cold { lines = Array(lines.suffix(4000)) }   // bound the initial backfill
-        for line in lines {
-            if let e = try? decoder.decode(RawEvent.self, from: Data(line)) { applyEvent(e) }
+        let allLines = Array(complete.split(separator: 0x0A, omittingEmptySubsequences: true))
+        // Fold only the recent window on a cold read; everything on an incremental read.
+        let foldStart = cold ? max(0, allLines.count - 4000) : 0
+        // Count today's commands over all NEW lines incrementally, or over the whole
+        // file during a day-change backfill. A plain cold read (rotation/restart)
+        // counts nothing — the persisted tally already covers it.
+        let countToday = needsBackfill || !cold
+        let beforeCount = commandsToday
+        for (i, line) in allLines.enumerated() {
+            guard let e = try? decoder.decode(RawEvent.self, from: Data(line)) else { continue }
+            if countToday, e.ev == "start", e.ts >= tallyDayStart, countsTowardTally(e) { commandsToday += 1 }
+            if i >= foldStart { applyEvent(e) }
         }
+        needsBackfill = false
+        if commandsToday != beforeCount { persistTally() }
         if parsedDone.count > Self.maxDoneRetained {
             parsedDone.removeFirst(parsedDone.count - Self.maxDoneRetained)
         }
+    }
+
+    // If the local day has changed since the tally was last anchored, reset it and
+    // force a cold re-read so the new day's count is backfilled from the log.
+    private func rolloverTallyIfNeeded() {
+        let dayStart = Calendar.current.startOfDay(for: now).timeIntervalSince1970
+        guard dayStart != tallyDayStart else { return }
+        tallyDayStart = dayStart
+        commandsToday = 0
+        needsBackfill = true
+        lastReadOffset = 0; parsedOpen = [:]; parsedDone = []
+        persistTally()
+    }
+
+    // Shell commands + Claude turns count toward the daily tally; external
+    // `joystick log` events don't (they aren't commands you ran).
+    private func countsTowardTally(_ e: RawEvent) -> Bool {
+        let kind = e.kind ?? (e.tty == "claude" ? "claude" : e.tty == "cli" ? "external" : "shell")
+        return kind == "shell" || kind == "claude"
+    }
+
+    private func persistTally() {
+        UserDefaults.standard.set(commandsToday, forKey: "commandsToday")
+        UserDefaults.standard.set(tallyDayStart, forKey: "tallyDayStart")
     }
 
     // Fold one event into the running state. Identical semantics whether applied
@@ -844,6 +887,10 @@ struct ContentView: View {
             Text(parts.isEmpty ? "Idle" : parts.joined(separator: " · "))
                 .font(.system(.subheadline, design: .rounded).weight(.semibold))
             Spacer()
+            Text("⌘ \(store.commandsToday) today")
+                .font(.system(.caption, design: .rounded))
+                .foregroundStyle(.secondary)
+                .help("Shell commands + Claude turns started today")
             Toggle("Pin", isOn: $floatOnTop)
                 .toggleStyle(.switch)
                 .controlSize(.mini)
