@@ -793,31 +793,25 @@ func shortModel(_ m: String) -> String {
 }
 
 // The session's name — your rename if you set one, else Claude's auto topic —
-// shown as a small chip atop the row, above the latest-prompt label. It's
-// identity, not state: a tag, not a signal. When the session has an agent
-// color the chip adopts it (icon + fill + outline); the label text stays in the
-// default color so it's legible at any hue (a yellow chip mustn't mean yellow,
-// unreadable text). With no color it's a quiet neutral gray, deliberately
-// staying out of the ✋/▶/◉ status palette.
-struct SessionBadge: View {
+// shown as a quiet eyebrow above the latest-prompt label: small, dim, no chrome,
+// so it reads as identity and stays subordinate to the prompt. A pill was too
+// loud here (it borrowed the ✋/▶/◉ status grammar for something that isn't
+// state). When the session has an agent color, a small dot carries it — color
+// without tinting the text, which keeps the name legible at any hue.
+struct SessionEyebrow: View {
     let name: String
-    let tint: Color?   // session's agent color, nil = neutral
+    let tint: Color?   // session's agent color, nil = no dot
 
     var body: some View {
-        let c = tint ?? .secondary
-        HStack(spacing: 3) {
-            Image(systemName: "tag.fill")
-                .font(.system(size: 8))
-                .foregroundStyle(c)
+        HStack(spacing: 4) {
+            if let tint {
+                Circle().fill(tint).frame(width: 6, height: 6)
+            }
             Text(name)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(tint == nil ? Color.secondary : Color.primary)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 1)
-        .background(Capsule().fill(c.opacity(0.15)))
-        .overlay(Capsule().strokeBorder(c.opacity(tint == nil ? 0 : 0.45), lineWidth: 0.75))
     }
 }
 
@@ -940,15 +934,15 @@ struct GroupRow: View {
         // So: text is NOT selectable; the whole row is a plain click → focus,
         // and copy lives in the right-click menu (whole command / directory).
         VStack(alignment: .leading, spacing: 1) {
-            // Name badge above the prompt label: your rename if set, else the
-            // auto session topic. Tinted by the session's agent color when set.
+            // Name eyebrow above the prompt label: your rename if set, else the
+            // auto session topic. The agent color (if any) rides a small dot.
             let badgeName = group.current.sessionName.isEmpty ? group.current.title
                                                               : group.current.sessionName
             if !badgeName.isEmpty {
                 HStack(spacing: 0) {
-                    Spacer().frame(width: 43)   // align the chip over the command text
-                    SessionBadge(name: badgeName,
-                                 tint: Color.claudeAgent(group.current.agentColor))
+                    Spacer().frame(width: 43)   // align the name over the command text
+                    SessionEyebrow(name: badgeName,
+                                   tint: Color.claudeAgent(group.current.agentColor))
                     Spacer(minLength: 0)
                 }
             }
