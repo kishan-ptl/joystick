@@ -12,7 +12,7 @@ Each operation is two events sharing an `id` — a `start` and an `end`.
 
 ```jsonc
 // start
-{"v":1,"ev":"start","id":"<unique>","cmd":"<text>","cwd":"<path>","pid":<int>,"tty":"<dev>","surface":"<ghostty-id>","ts":<unix>}
+{"v":1,"kind":"shell","ev":"start","id":"<unique>","cmd":"<text>","cwd":"<path>","pid":<int>,"tty":"<dev>","surface":"<ghostty-id>","ts":<unix>}
 // end   (dur optional — viewer computes end.ts - start.ts if omitted; exit -1 = killed)
 {"v":1,"ev":"end","id":"<same id>","exit":<int>,"dur":<secs>,"ts":<unix>}
 // waiting / active  (optional — drives the amber "needs you" state)
@@ -31,20 +31,21 @@ Each operation is two events sharing an `id` — a `start` and an `end`.
 | field | meaning |
 |---|---|
 | `v` | schema version (currently `1`); absent on pre-versioning events |
+| `kind` | `shell` / `claude` / `external` — producer type (on `start`). Legacy events omit it; derive from `tty` |
 | `id` | groups start/end; Claude sessions reuse `claude-<sid>` across turns |
 | `cmd` | command line / prompt / op name (**sanitized** — see PRIVACY.md) |
 | `cwd` | working directory (click-to-focus / jump target) |
 | `pid` | local process id; the viewer drops a running row when it dies |
-| `tty` | terminal device. Special values: `claude` (a Claude turn), `cli` (external) |
+| `tty` | terminal device (shell ops only; empty for claude/external — see `kind`) |
 | `surface` | Ghostty surface id, for click-to-focus |
 | `ts` | unix seconds |
 | `exit` / `dur` / `msg` | end status / duration / waiting reason |
 
 ## Producers
 
-- **`joystick.zsh`** — local shell commands (preexec/precmd hooks).
-- **`claude-hook.sh`** — Claude Code turns (tty `claude`).
-- **`joystick` CLI** — external / CI / webhook events (tty `cli`), below.
+- **`joystick.zsh`** — local shell commands (`kind: shell`; preexec/precmd hooks).
+- **`claude-hook.sh`** — Claude Code turns (`kind: claude`).
+- **`joystick` CLI** — external / CI / webhook events (`kind: external`), below.
 
 ## External events — the `joystick` CLI
 
@@ -56,7 +57,7 @@ joystick log start <name> [--id ID]               # begin → running; prints it
 joystick log end   <id>   [--exit N]              # finish a started op
 ```
 
-External events (tty `cli`) have no Ghostty surface or live pid, so the viewer
+External events (`kind: external`) have no Ghostty surface or live pid, so the viewer
 keeps them regardless of surface/pid liveness — running ones expire 24h after
 `start` if no `end` arrives. They are informational: not click-to-focus (no
 tab) and they don't raise the unseen badge.

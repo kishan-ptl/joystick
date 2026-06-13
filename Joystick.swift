@@ -12,6 +12,7 @@ import Darwin
 
 struct RawEvent: Decodable {
     let v: Int?            // schema version (1); absent on pre-versioning events
+    let kind: String?      // "shell" | "claude" | "external"; absent on legacy events (derive from tty)
     let ev: String
     let id: String
     let cmd: String?
@@ -29,8 +30,9 @@ struct Op: Identifiable {
     let key: String
     let cmd: String
     let cwd: String
-    let tty: String
+    let tty: String        // real device for shell ops; "" for claude/external
     let surface: String
+    let kind: String       // "shell" | "claude" | "external"
     let pid: Int32
     let start: Double
     var endTs: Double? = nil
@@ -45,8 +47,8 @@ struct Op: Identifiable {
     var id: String { "\(key)-\(Int(start))" }
     var isRunning: Bool { endTs == nil }
     var isWaiting: Bool { isRunning && (waitingSince != nil || stallIdle != nil) }
-    var isClaude: Bool { tty == "claude" }
-    var isExternal: Bool { tty == "cli" }   // emitted by `joystick log` (CI/webhooks); no local pid or surface
+    var isClaude: Bool { kind == "claude" }
+    var isExternal: Bool { kind == "external" }   // `joystick log` (CI/webhooks); no local pid or surface
 
     // Stable grouping identity. A Claude session keeps ONE id across all its
     // turns (claude-<sid>), so group by that — robust even when surface
@@ -139,7 +141,7 @@ final class Store: ObservableObject {
         // asleep with no CPU — almost certainly waiting on the user. Sampled
         // every 5s on a background queue (it shells out to ps); rows pick up
         // the previous sample, one tick of lag is invisible.
-        refreshTtyStates(ttys: Set(running.map(\.tty)), nowTs: nowTs)
+        refreshTtyStates(ttys: Set(running.filter { $0.kind == "shell" }.map(\.tty)), nowTs: nowTs)
         running = running.map { op -> Op in
             var op = op
             if op.waitingSince == nil {
@@ -261,8 +263,12 @@ final class Store: ObservableObject {
         for line in text.split(separator: "\n").suffix(4000) {
             guard let e = try? decoder.decode(RawEvent.self, from: Data(line.utf8)) else { continue }
             if e.ev == "start" {
+                // Prefer the explicit kind; fall back to the old tty sentinels
+                // for events written before the kind field existed.
+                let kind = e.kind ?? (e.tty == "claude" ? "claude"
+                                      : e.tty == "cli" ? "external" : "shell")
                 open[e.id] = Op(key: e.id, cmd: e.cmd ?? "?", cwd: e.cwd ?? "",
-                                tty: e.tty ?? "", surface: e.surface ?? "",
+                                tty: e.tty ?? "", surface: e.surface ?? "", kind: kind,
                                 pid: e.pid ?? -1, start: e.ts)
             } else if e.ev == "end", var op = open.removeValue(forKey: e.id) {
                 op.endTs = e.ts
@@ -286,7 +292,7 @@ final class Store: ObservableObject {
     private func refreshTtyStates(ttys: Set<String>, nowTs: Double) {
         guard now.timeIntervalSince(lastStallCheck) >= 5 else { return }
         lastStallCheck = now
-        let candidates = ttys.filter { !$0.isEmpty && $0 != "claude" && $0 != "cli" }
+        let candidates = ttys.filter { !$0.isEmpty }   // already shell-only; real device ttys
         guard !candidates.isEmpty else { ttyStates = [:]; return }
         DispatchQueue.global(qos: .utility).async {
             var states: [String: TtyState] = [:]

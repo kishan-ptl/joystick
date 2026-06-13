@@ -64,7 +64,7 @@ case $event in
     # appends from other shells/hooks stay atomic — don't raise it materially.
     jq -cn --arg id "$id" --arg cmd "🤖 ${prompt[1,120]}" --arg cwd "$cwd" \
       --arg surface "$surface" --argjson pid "$(claude_pid)" --argjson ts "$now" \
-      '{v:1,ev:"start",id:$id,cmd:$cmd,cwd:$cwd,pid:$pid,tty:"claude",surface:$surface,ts:$ts}' >> "$LOG"
+      '{v:1,kind:"claude",ev:"start",id:$id,cmd:$cmd,cwd:$cwd,pid:$pid,tty:"",surface:$surface,ts:$ts}' >> "$LOG"
     ;;
   Stop)
     rm -f "${LOG:h}/waiting-$sid"

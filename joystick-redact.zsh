@@ -1,5 +1,8 @@
-# joystick — command sanitizing, shared by joystick.zsh and claude-hook.sh.
+# joystick — shared zsh helpers: JSON escaping + command sanitizing. Sourced by
+# joystick.zsh, the `joystick` CLI, claude-hook.sh, and joystick-scrub.sh so the
+# emitters can't drift in how they escape/redact.
 #
+# _joystick_esc <text>     -> sets REPLY to a JSON-safe string.
 # _joystick_redact <text>  -> sets REPLY to the sanitized text.
 #
 # Design: NO secret-detection heuristics. Two kinds of deterministic,
@@ -20,6 +23,20 @@
 # (`mysql -phunter2`), secrets embedded in tokens containing "/" (rare; the
 # context rules cover the usual carriers). For sensitive work use
 # JOYSTICK_NOLOG_DIRS or JOYSTICK_LOG_MODE=head.
+
+# JSON string escaping for emitted event fields. Named escapes first, then strip
+# any remaining control chars (e.g. raw ESC bytes in pasted commands). Sets REPLY.
+_joystick_esc() {
+  emulate -L zsh
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\t'/\\t}
+  s=${s//$'\r'/\\r}
+  s=${s//[[:cntrl:]]/}
+  typeset -g REPLY=$s
+}
 
 # Replace regex matches in the dynamically-scoped variable `s`.
 # $1=ERE pattern  $2=group index to redact (0 = whole match)  $3=1 for case-insensitive

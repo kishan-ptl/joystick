@@ -18,17 +18,13 @@ LOG="${XDG_STATE_HOME:-$HOME/.local/state}/joystick/events.jsonl"
 HERE=${0:A:h}
 mkdir -p "${LOG:h}"
 [[ -e $LOG ]] || { : >> "$LOG"; chmod 600 "$LOG" }
-[[ -f $HERE/joystick-redact.zsh ]] && source "$HERE/joystick-redact.zsh"
+if [[ -f $HERE/joystick-redact.zsh ]]; then
+  source "$HERE/joystick-redact.zsh"
+else
+  print -u2 "joystick: missing joystick-redact.zsh next to this script"; exit 1
+fi
 
-_jl_redact() {
-  if (( ${+functions[_joystick_redact]} )); then _joystick_redact "$1"; print -r -- "$REPLY"
-  else print -r -- "$1"; fi
-}
-_jl_esc() {
-  local s=$1
-  s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\n'/ }; s=${s//$'\t'/ }; s=${s//[[:cntrl:]]/}
-  print -r -- "$s"
-}
+_jl_clean() { _joystick_redact "$1"; _joystick_esc "$REPLY" }   # redact + JSON-escape -> REPLY
 emit()  { print -r -- "$1" >> "$LOG" }
 newid() { print -r -- "cli-${EPOCHSECONDS}-${RANDOM}" }
 
@@ -54,8 +50,8 @@ case $sub in
   start)
     [[ -n $name ]] || { print -u2 "joystick log start <name>"; exit 2 }
     [[ -n $id ]] || id=$(newid)
-    name=$(_jl_esc "$(_jl_redact "$name")")
-    emit "{\"v\":1,\"ev\":\"start\",\"id\":\"$id\",\"cmd\":\"$name\",\"cwd\":\"\",\"pid\":0,\"tty\":\"cli\",\"surface\":\"\",\"ts\":$EPOCHSECONDS}"
+    _jl_clean "$name"; name=$REPLY
+    emit "{\"v\":1,\"kind\":\"external\",\"ev\":\"start\",\"id\":\"$id\",\"cmd\":\"$name\",\"cwd\":\"\",\"pid\":0,\"tty\":\"\",\"surface\":\"\",\"ts\":$EPOCHSECONDS}"
     print -r -- "$id"
     ;;
   end)
@@ -66,8 +62,8 @@ case $sub in
   done)
     [[ -n $name ]] || { print -u2 "joystick log done <name> [--exit N] [--took S]"; exit 2 }
     id=$(newid)
-    name=$(_jl_esc "$(_jl_redact "$name")")
-    emit "{\"v\":1,\"ev\":\"start\",\"id\":\"$id\",\"cmd\":\"$name\",\"cwd\":\"\",\"pid\":0,\"tty\":\"cli\",\"surface\":\"\",\"ts\":$(( EPOCHSECONDS - took ))}"
+    _jl_clean "$name"; name=$REPLY
+    emit "{\"v\":1,\"kind\":\"external\",\"ev\":\"start\",\"id\":\"$id\",\"cmd\":\"$name\",\"cwd\":\"\",\"pid\":0,\"tty\":\"\",\"surface\":\"\",\"ts\":$(( EPOCHSECONDS - took ))}"
     emit "{\"v\":1,\"ev\":\"end\",\"id\":\"$id\",\"exit\":$exit_code,\"dur\":$took,\"ts\":$EPOCHSECONDS}"
     ;;
   *) print -u2 "joystick log {done|start|end} …"; exit 2 ;;

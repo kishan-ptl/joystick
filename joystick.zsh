@@ -25,18 +25,7 @@ if [[ -f $JOYSTICK_LOG ]] && (( $(stat -f %z "$JOYSTICK_LOG" 2>/dev/null || echo
 fi
 command find "${JOYSTICK_LOG:h}" \( -name 'surface-*' -o -name 'waiting-*' \) -mtime +7 -delete 2>/dev/null
 
-# Minimal JSON string escaping. Named escapes first, then strip any
-# remaining control characters (e.g. raw ESC bytes in pasted commands).
-_joystick_esc() {
-  local s=$1
-  s=${s//\\/\\\\}
-  s=${s//\"/\\\"}
-  s=${s//$'\n'/\\n}
-  s=${s//$'\t'/\\t}
-  s=${s//$'\r'/\\r}
-  s=${s//[[:cntrl:]]/}
-  typeset -g REPLY=$s
-}
+# _joystick_esc (JSON escaping) is provided by joystick-redact.zsh, sourced above.
 
 # Identify which Ghostty surface this shell lives in, so viewers can focus
 # the exact tab/split. Queried once per shell, lazily, on the first command:
@@ -72,7 +61,7 @@ _joystick_preexec() {
   # while each line is < ~4096 bytes (PIPE_BUF). Don't raise it past ~3KB.
   _joystick_esc "${raw[1,300]}"; cmd=$REPLY
   _joystick_esc "$PWD"; cwd=$REPLY
-  print -r -- "{\"v\":1,\"ev\":\"start\",\"id\":\"$_joystick_id\",\"cmd\":\"$cmd\",\"cwd\":\"$cwd\",\"pid\":$$,\"tty\":\"${TTY:t}\",\"surface\":\"$surface\",\"ts\":$EPOCHSECONDS}" >> "$JOYSTICK_LOG"
+  print -r -- "{\"v\":1,\"kind\":\"shell\",\"ev\":\"start\",\"id\":\"$_joystick_id\",\"cmd\":\"$cmd\",\"cwd\":\"$cwd\",\"pid\":$$,\"tty\":\"${TTY:t}\",\"surface\":\"$surface\",\"ts\":$EPOCHSECONDS}" >> "$JOYSTICK_LOG"
 }
 
 _joystick_precmd() {
