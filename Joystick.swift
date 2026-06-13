@@ -138,6 +138,12 @@ final class Store: ObservableObject {
     private var reloadDebounce: DispatchWorkItem?
     private var activeTick: Timer?
     private var backstopTimer: Timer?
+    // 1 Hz sampler for the focused-tab highlight, live ONLY while Ghostty is
+    // frontmost (started/stopped by focusObserver). Catches tab/split switches,
+    // which don't change the frontmost app; off at rest, so it doesn't regress
+    // the log-watch model's quiet.
+    private var focusTick: Timer?
+    private var focusObserver: NSObjectProtocol?
     // Daily command tally (shell + Claude turns started today, local time). Driven
     // incrementally as starts are folded; recomputed from the log only on a day
     // change (backfill), and persisted so it survives restarts and log rotation.
@@ -159,12 +165,48 @@ final class Store: ObservableObject {
         backstopTimer = Timer.scheduledTimer(withTimeInterval: Self.backstopSecs, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.reload() }
         }
+        startFocusTracking()
     }
 
     deinit {
         logWatcher?.cancel()
         activeTick?.invalidate()
         backstopTimer?.invalidate()
+        focusTick?.invalidate()
+        if let o = focusObserver { NSWorkspace.shared.notificationCenter.removeObserver(o) }
+    }
+
+    // Make the focused-tab highlight responsive without a perpetual poll. The
+    // instant Ghostty becomes frontmost we sample immediately (switching INTO
+    // Ghostty feels instant), then tick at 1 Hz to catch tab/split switches
+    // within Ghostty (those don't fire an app-activation notification). When any
+    // other app takes over we stop ticking — nothing fires at rest.
+    private func startFocusTracking() {
+        focusObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            MainActor.assumeIsolated {
+                let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                self?.updateFocusTick(app?.bundleIdentifier == "com.mitchellh.ghostty")
+            }
+        }
+        // Launch case: Ghostty may already be frontmost.
+        updateFocusTick(NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.mitchellh.ghostty")
+    }
+
+    // Start/stop the 1 Hz focus sampler. Idempotent. Does NOT clear
+    // focusedSurface on stop — the highlight holds on the last tab you were in.
+    private func updateFocusTick(_ ghosttyFront: Bool) {
+        if ghosttyFront {
+            pollFocusedSurface()   // immediate, so switching INTO Ghostty is instant
+            guard focusTick == nil else { return }
+            focusTick = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.pollFocusedSurface() }
+            }
+        } else {
+            focusTick?.invalidate()
+            focusTick = nil
+        }
     }
 
     private var logURL: URL {
@@ -643,22 +685,26 @@ final class Store: ObservableObject {
     }
 
     // While the user is actually in Ghostty, whatever surface is focused is
-    // being viewed — stamp it. Cheap AppleScript, sampled every 2s, and only
-    // when Ghostty is the frontmost app (a background tab isn't "viewed").
+    // being viewed — stamp it (and highlight its row). Cheap AppleScript, only
+    // when Ghostty is frontmost (a background tab isn't "viewed"). Paced by the
+    // focus tick (see updateFocusTick) at ~1 Hz; the 0.75s floor just dedupes
+    // the overlap with reload()'s call while an op is running.
     private func pollFocusedSurface() {
         guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.mitchellh.ghostty",
-              Date().timeIntervalSince(lastFocusPoll) >= 2 else { return }
+              Date().timeIntervalSince(lastFocusPoll) >= 0.75 else { return }
         lastFocusPoll = Date()
         DispatchQueue.global(qos: .utility).async {
             let id = Self.fetchFocusedSurfaceId()
             DispatchQueue.main.async { [weak self] in
                 guard let self, let id, !id.isEmpty else { return }
                 self.seenAt[id] = Date().timeIntervalSince1970
-                self.focusedSurface = id   // highlight this row; not cleared on blur
-                // In-memory state updates every sample; disk persistence only
-                // needs to survive restarts, so write only on focus change.
+                // Publish the highlight + persist seen-state only on an actual
+                // focus CHANGE — otherwise a 1 Hz sample would redraw the whole
+                // list every second while you sit in one tab. Not cleared on
+                // blur: the highlight holds on the last tab you were in.
                 if self.lastPersistedFocus != id {
                     self.lastPersistedFocus = id
+                    self.focusedSurface = id
                     self.persistSeen()
                 }
             }
@@ -782,6 +828,30 @@ struct ClaudeThinkingIcon: View {
     }
 }
 
+// A row that needs you, shown as a soft yellow light that gently breathes —
+// opacity (and a faint glow) eased in and out on a sine, calm rather than an
+// attention-grabbing on/off blink. TimelineView drives the redraw, so it pauses
+// when the row is off-screen and survives row reloads with no manual Timer/@State
+// to leak or reset — same approach as ClaudeThinkingIcon.
+struct WaitingLight: View {
+    private static let period = 2.0          // seconds per full breath
+    private static let fps = 24.0
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1.0 / Self.fps)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let phase = (sin(t / Self.period * 2 * Double.pi) + 1) / 2   // 0…1, smooth
+            let level = 0.3 + 0.7 * phase                                // 0.3…1.0
+            Image(systemName: "circle.fill")
+                .font(.system(size: 13))
+                .foregroundStyle(.yellow)
+                .opacity(level)
+                .shadow(color: .yellow.opacity(level * 0.7), radius: 3)   // breathing halo
+                .frame(width: 16, height: 16)   // fixed box so it lines up with the other glyphs
+        }
+    }
+}
+
 // "claude-opus-4-8" -> "Opus", etc. for the meta badge.
 func shortModel(_ m: String) -> String {
     let l = m.lowercased()
@@ -858,7 +928,7 @@ struct OpRow: View {
     private var statusIcon: some View {
         Group {
             if op.isWaiting {
-                Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
+                WaitingLight()         // soft yellow breathing light = needs you
             } else if op.isService {
                 Image(systemName: "antenna.radiowaves.left.and.right").foregroundStyle(.green)
             } else if op.isRunning && op.isClaude {
@@ -969,14 +1039,12 @@ struct GroupRow: View {
         .help("Click to focus this tab in Ghostty · right-click to copy")
         .contextMenu { copyMenu(for: group.current) }
         // "You are here": tint the row for the surface focused in Ghostty right
-        // now. A leading accent bar + faint fill — deliberately NOT a glyph
-        // color, so it never competes with the ✋/▶/◉/✓/✗ state vocabulary.
+        // now. Neutral grey (the system's inactive-selection fill), like a
+        // dimmed Ghostty split — quiet on purpose, so it never competes with the
+        // colored ✋/▶/◉/✓/✗ state glyphs.
         .listRowBackground(
-            HStack(spacing: 0) {
-                Rectangle().fill(Color.accentColor).frame(width: 3)
-                Color.accentColor.opacity(0.12)
-            }
-            .opacity(isFocused ? 1 : 0)
+            isFocused ? Color(nsColor: .unemphasizedSelectedContentBackgroundColor)
+                      : Color.clear
         )
     }
 
