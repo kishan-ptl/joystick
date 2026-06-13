@@ -64,6 +64,25 @@ close_turn() {  # $1 = exit code  $2 = notify title  $3 = notify verb
   if (( elapsed >= MIN_NOTIFY_SECS )) && ! ghostty_frontmost; then
     notify "$2" "$3 after $((elapsed / 60))m$((elapsed % 60))s in ${cwd:t}"
   fi
+  emit_meta
+}
+
+# Emit session metadata from the Claude transcript: topic title, model,
+# permission mode, and context-window fill (the latest request's token count =
+# input + cache_read + cache_creation). Runs on turn close (async).
+emit_meta() {
+  local tpath title mode model ctx
+  tpath=$(jq -r '.transcript_path // empty' <<<"$input")
+  [[ -f $tpath ]] || tpath="$HOME/.claude/projects/${cwd//\//-}/$sid.jsonl"
+  [[ -f $tpath ]] || return 0
+  title=$(grep -F '"type":"ai-title"' "$tpath" 2>/dev/null | tail -1 | jq -r '.aiTitle // empty' 2>/dev/null)
+  mode=$(grep -F '"type":"permission-mode"' "$tpath" 2>/dev/null | tail -1 | jq -r '.permissionMode // empty' 2>/dev/null)
+  model=$(tail -100 "$tpath" | jq -r 'select(.message.model != null) | .message.model' 2>/dev/null | tail -1)
+  ctx=$(tail -100 "$tpath" | jq -r 'select(.message.usage != null) | .message.usage | (.input_tokens + .cache_read_input_tokens + .cache_creation_input_tokens)' 2>/dev/null | tail -1)
+  [[ -n $title ]] && { _joystick_redact "$title"; title=${REPLY[1,80]}; }
+  jq -cn --arg id "$id" --arg title "${title:-}" --arg model "${model:-}" --arg mode "${mode:-}" \
+    --argjson ctx "${ctx:-0}" --argjson ts "$now" \
+    '{v:1,ev:"meta",id:$id,title:$title,model:$model,mode:$mode,ctx:$ctx,ts:$ts}' >> "$LOG"
 }
 
 case $event in

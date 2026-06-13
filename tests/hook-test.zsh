@@ -50,6 +50,17 @@ fire '{"hook_event_name":"UserPromptSubmit","session_id":"s6","cwd":"/tmp","prom
 fire '{"hook_event_name":"PostToolUseFailure","session_id":"s6","cwd":"/tmp","tool_name":"Bash"}'
 check "tool failure -> activity" "$(grep '"id":"claude-s6"' "$LOG" | grep '"ev":"active"' | jq -r '.act' | tail -1)" "⚠ Bash failed"
 
+# meta event: title / mode / model / ctx extracted from the transcript.
+FIX=$TMP/fix.jsonl
+print -r -- '{"type":"ai-title","aiTitle":"My Topic","sessionId":"s7"}' >> "$FIX"
+print -r -- '{"type":"permission-mode","permissionMode":"auto","sessionId":"s7"}' >> "$FIX"
+print -r -- '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"cache_read_input_tokens":50000,"cache_creation_input_tokens":0,"output_tokens":500}}}' >> "$FIX"
+fire "{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"s7\",\"cwd\":\"/tmp\",\"prompt\":\"go\"}"
+fire "{\"hook_event_name\":\"Stop\",\"session_id\":\"s7\",\"cwd\":\"/tmp\",\"transcript_path\":\"$FIX\"}"
+check "meta title" "$(grep '"id":"claude-s7"' "$LOG" | grep '"ev":"meta"' | jq -r '.title' | tail -1)" "My Topic"
+check "meta ctx sum" "$(grep '"id":"claude-s7"' "$LOG" | grep '"ev":"meta"' | jq -r '.ctx' | tail -1)" "51000"
+check "meta mode" "$(grep '"id":"claude-s7"' "$LOG" | grep '"ev":"meta"' | jq -r '.mode' | tail -1)" "auto"
+
 # Every emitted event carries the schema version.
 check "events are v:1" "$(grep -c '"v":1' "$LOG")" "$(grep -c '"ev":' "$LOG")"
 
