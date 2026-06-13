@@ -24,6 +24,7 @@ struct RawEvent: Decodable {
     let exit: Int?
     let dur: Double?
     let msg: String?
+    let act: String?       // current activity (tool the agent just used), on `active` events
 }
 
 struct Op: Identifiable {
@@ -40,6 +41,7 @@ struct Op: Identifiable {
     var dur: Double? = nil
     var waitingSince: Double? = nil   // explicit waiting event (Claude hooks)
     var waitingMsg: String? = nil
+    var activity: String? = nil       // live: tool the agent is currently using (Claude)
     var stallIdle: Double? = nil      // heuristic: tty quiet + fg proc asleep
     var isService = false             // fg process group holds a listening port
     var unseen = false                // finished, and surface not viewed since
@@ -360,10 +362,12 @@ final class Store: ObservableObject {
             } else if e.ev == "waiting", var op = open[e.id] {
                 op.waitingSince = e.ts
                 op.waitingMsg = e.msg
+                op.activity = nil          // blocked on you, not running a tool
                 open[e.id] = op
             } else if e.ev == "active", var op = open[e.id] {
                 op.waitingSince = nil
                 op.waitingMsg = nil
+                op.activity = e.act        // live "what it's doing now"
                 open[e.id] = op
             }
         }
@@ -656,6 +660,8 @@ struct OpRow: View {
             parts.append("✋ \(what) — \(fmt(nowTs - since))")
         } else if let idle = op.stallIdle {
             parts.append("✋ waiting for input? quiet \(fmt(idle))")
+        } else if op.isRunning, let act = op.activity, !act.isEmpty {
+            parts.append("⚙ \(act)")       // live agent activity (PostToolUse)
         } else if op.isService {
             parts.append("serving")
         }

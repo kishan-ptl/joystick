@@ -104,11 +104,26 @@ case $event in
     fi
     ;;
   PostToolUse)
-    # Cheap guard: only relevant if this session is currently marked waiting.
-    marker="${LOG:h}/waiting-$sid"
-    [[ -f $marker ]] || exit 0
-    rm -f "$marker"
-    jq -cn --arg id "$id" --argjson ts "$now" '{v:1,ev:"active",id:$id,ts:$ts}' >> "$LOG"
+    # Surface the tool just used as the live activity subtitle, and clear any
+    # waiting state. Fires on every tool use (async hook), so keep it cheap.
+    rm -f "${LOG:h}/waiting-$sid"
+    tool=$(jq -r '.tool_name // empty' <<<"$input")
+    case $tool in
+      Bash)       d=$(jq -r '.tool_input.command // ""' <<<"$input"); act="Bash: $d" ;;
+      Edit|Write|Read|MultiEdit|NotebookEdit)
+                  d=$(jq -r '.tool_input.file_path // ""' <<<"$input"); act="$tool ${d:t}" ;;
+      Grep|Glob)  d=$(jq -r '.tool_input.pattern // ""' <<<"$input"); act="$tool: $d" ;;
+      Task|Agent) d=$(jq -r '.tool_input.description // .tool_input.subagent_type // ""' <<<"$input"); act="Task: $d" ;;
+      WebFetch)   d=$(jq -r '.tool_input.url // ""' <<<"$input"); act="WebFetch $d" ;;
+      WebSearch)  d=$(jq -r '.tool_input.query // ""' <<<"$input"); act="Search: $d" ;;
+      "")         act="" ;;
+      *)          act="$tool" ;;
+    esac
+    if [[ -n $act ]]; then
+      _joystick_redact "$act"; act=${REPLY[1,120]}   # redact secrets; keep line < PIPE_BUF
+      jq -cn --arg id "$id" --arg act "$act" --argjson ts "$now" \
+        '{v:1,ev:"active",id:$id,act:$act,ts:$ts}' >> "$LOG"
+    fi
     ;;
 esac
 exit 0

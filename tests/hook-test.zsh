@@ -35,6 +35,11 @@ fire '{"hook_event_name":"UserPromptSubmit","session_id":"s3","cwd":"/tmp","prom
 fire '{"hook_event_name":"Stop","session_id":"s3","cwd":"/tmp"}'
 check "plain turn closes" "$(ends s3)" "1"
 
+# PostToolUse surfaces the tool just used as activity (act on the active event).
+fire '{"hook_event_name":"UserPromptSubmit","session_id":"s4","cwd":"/tmp","prompt":"go"}'
+fire '{"hook_event_name":"PostToolUse","session_id":"s4","cwd":"/tmp","tool_name":"Edit","tool_input":{"file_path":"/a/b/foo.swift"}}'
+check "activity captured" "$(grep '"id":"claude-s4"' "$LOG" | grep '"ev":"active"' | jq -r '.act' | tail -1)" "Edit foo.swift"
+
 # Every emitted event carries the schema version.
 check "events are v:1" "$(grep -c '"v":1' "$LOG")" "$(grep -c '"ev":' "$LOG")"
 
