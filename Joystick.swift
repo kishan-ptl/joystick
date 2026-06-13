@@ -25,6 +25,10 @@ struct RawEvent: Decodable {
     let dur: Double?
     let msg: String?
     let act: String?       // current activity (tool the agent just used), on `active` events
+    let title: String?     // session topic (ai-title), on `meta` events
+    let model: String?     // model id, on `meta` events
+    let mode: String?      // permission mode, on `meta` events
+    let ctx: Double?       // context-window tokens used, on `meta` events
 }
 
 struct Op: Identifiable {
@@ -46,6 +50,10 @@ struct Op: Identifiable {
     var isService = false             // fg process group holds a listening port
     var unseen = false                // finished, and surface not viewed since
     var summary: String? = nil        // Claude's closing blurb, on the end event
+    var title = ""                    // session topic (from meta events), Claude rows
+    var model = ""                    // model id (from meta events)
+    var mode = ""                     // permission mode (from meta events)
+    var ctxTokens: Double = 0         // context-window fill (from meta events)
 
     var id: String { "\(key)-\(Int(start))" }
     var isRunning: Bool { endTs == nil }
@@ -68,6 +76,9 @@ struct SurfaceGroup: Identifiable {
     var history: [Op] = []
     var id: String { key }
 }
+
+// Per-session metadata from the transcript (`meta` events), keyed by claude-<sid>.
+struct SessionMeta { var title = ""; var model = ""; var mode = ""; var ctx: Double = 0 }
 
 // MARK: - Store
 
@@ -102,6 +113,7 @@ final class Store: ObservableObject {
     private var lastReadOffset: UInt64 = 0   // bytes of the log already folded in
     private var parsedOpen: [String: Op] = [:]
     private var parsedDone: [Op] = []
+    private var parsedMeta: [String: SessionMeta] = [:]
     private var lastPersistedFocus: String? = nil
     private var liveSurfaces: Set<String>? = nil
     private var lastSurfacePoll = Date.distantPast
@@ -269,8 +281,17 @@ final class Store: ObservableObject {
             return a.current.start < b.current.start
         }
         idle.sort { ($0.current.endTs ?? 0) > ($1.current.endTs ?? 0) }
-        activeGroups = active
-        idleGroups = idle
+        // Attach per-session meta (title/model/mode/ctx from `meta` events) to
+        // each Claude group's current op for display.
+        func withMeta(_ g: SurfaceGroup) -> SurfaceGroup {
+            guard let m = parsedMeta[g.key] else { return g }
+            var g = g
+            g.current.title = m.title; g.current.model = m.model
+            g.current.mode = m.mode; g.current.ctxTokens = m.ctx
+            return g
+        }
+        activeGroups = active.map(withMeta)
+        idleGroups = idle.map(withMeta)
 
         let unseenCount = idle.filter { $0.current.unseen }.count
         NSApp.dockTile.badgeLabel = unseenCount > 0 ? "\(unseenCount)" : nil
@@ -371,10 +392,10 @@ final class Store: ObservableObject {
         lastLogSize = size
 
         // Rotation/truncation (the log shrank or was replaced): re-read from top.
-        if size < lastReadOffset { lastReadOffset = 0; parsedOpen = [:]; parsedDone = [] }
+        if size < lastReadOffset { lastReadOffset = 0; parsedOpen = [:]; parsedDone = []; parsedMeta = [:] }
 
         guard let fh = try? FileHandle(forReadingFrom: logURL) else {
-            lastReadOffset = 0; parsedOpen = [:]; parsedDone = []
+            lastReadOffset = 0; parsedOpen = [:]; parsedDone = []; parsedMeta = [:]
             return
         }
         defer { try? fh.close() }
@@ -420,7 +441,7 @@ final class Store: ObservableObject {
         tallyDayStart = dayStart
         commandsToday = 0
         needsBackfill = true
-        lastReadOffset = 0; parsedOpen = [:]; parsedDone = []
+        lastReadOffset = 0; parsedOpen = [:]; parsedDone = []; parsedMeta = [:]
         persistTally()
     }
 
@@ -470,6 +491,12 @@ final class Store: ObservableObject {
                 op.activity = e.act        // live "what it's doing now"
                 parsedOpen[e.id] = op
             }
+        case "meta":
+            // Session metadata (title/model/mode/ctx). Keyed by claude-<sid>;
+            // attached to the group's current op at render time. Emitted AFTER
+            // the end event, so the op is already in `done` — keep it separate.
+            parsedMeta[e.id] = SessionMeta(title: e.title ?? "", model: e.model ?? "",
+                                           mode: e.mode ?? "", ctx: e.ctx ?? 0)
         default:
             break
         }
@@ -709,6 +736,16 @@ struct ClaudeThinkingIcon: View {
     }
 }
 
+// "claude-opus-4-8" -> "Opus", etc. for the meta badge.
+func shortModel(_ m: String) -> String {
+    let l = m.lowercased()
+    if l.contains("opus") { return "Opus" }
+    if l.contains("sonnet") { return "Sonnet" }
+    if l.contains("haiku") { return "Haiku" }
+    if l.contains("fable") { return "Fable" }
+    return m
+}
+
 struct OpRow: View {
     let op: Op
     let nowTs: Double
@@ -721,7 +758,7 @@ struct OpRow: View {
                 .opacity(op.unseen ? 1 : 0)
             statusIcon
             VStack(alignment: .leading, spacing: 2) {
-                Text(op.cmd)
+                Text(displayLabel)
                     .font(.system(.body, design: .monospaced))
                     .lineLimit(2)
                 if let blurb = op.summary, !blurb.isEmpty, !op.isRunning {
@@ -766,6 +803,12 @@ struct OpRow: View {
         .font(.system(size: 16))
     }
 
+    // Claude rows show the session topic (ai-title) when known — a stable label
+    // across turns — falling back to the latest prompt.
+    private var displayLabel: String {
+        (op.isClaude && !op.title.isEmpty) ? op.title : op.cmd
+    }
+
     private var subtitle: String {
         var parts: [String] = []
         if let since = op.waitingSince {
@@ -784,6 +827,14 @@ struct OpRow: View {
             parts.append(code == -1 ? "killed" : "exit \(code)")
         }
         if let end = op.endTs { parts.append(fmt(nowTs - end) + " ago") }
+        if op.isClaude {   // session context fill + model + notable mode (from meta)
+            if op.ctxTokens > 0 {
+                let limit = op.ctxTokens > 200_000 ? 1_000_000.0 : 200_000.0
+                parts.append("\(Int((op.ctxTokens / limit) * 100))% ctx")
+            }
+            if !op.model.isEmpty { parts.append(shortModel(op.model)) }
+            if op.mode == "bypassPermissions" { parts.append("⚠ bypass") }
+        }
         return parts.joined(separator: " · ")
     }
 
