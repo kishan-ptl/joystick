@@ -24,19 +24,29 @@ if [[ -f $JOYSTICK_LOG ]] && (( $(stat -f %z "$JOYSTICK_LOG" 2>/dev/null || echo
   tail -n 2000 "$JOYSTICK_LOG" > "$JOYSTICK_LOG.tmp" && mv "$JOYSTICK_LOG.tmp" "$JOYSTICK_LOG"
 fi
 command find "${JOYSTICK_LOG:h}" \( -name 'surface-*' -o -name 'waiting-*' \) -mtime +7 -delete 2>/dev/null
+# Clear any stale surface cache for this PID (guards against PID reuse).
+command rm -f "${JOYSTICK_LOG:h}/surface-shell-$$" 2>/dev/null
 
 # _joystick_esc (JSON escaping) is provided by joystick-redact.zsh, sourced above.
 
-# Identify which Ghostty surface this shell lives in, so viewers can focus
-# the exact tab/split. Queried once per shell, lazily, on the first command:
-# typing a command means this surface is focused right now. A shell never
-# moves between surfaces, so the cached value stays correct.
+# Identify which Ghostty surface this shell lives in, so viewers can focus the
+# exact tab/split. The AppleScript round-trip is ~50-150ms, so it NEVER runs on
+# the foreground path: fire it in the BACKGROUND and let the result land in a
+# per-shell cache file. The first command in a tab logs with no surface (focus
+# falls back to cwd); the next command reads the cache. A shell never moves
+# surfaces, so the cached value stays correct.
 _joystick_get_surface() {
   [[ -n ${_joystick_surface:-} ]] && return 0
-  if [[ ${TERM_PROGRAM:-} == ghostty ]]; then
-    typeset -g _joystick_surface=$(osascript -e 'tell application "Ghostty" to get id of focused terminal of selected tab of front window' 2>/dev/null)
+  local cache="${JOYSTICK_LOG:h}/surface-shell-$$"
+  if [[ -s $cache ]]; then
+    typeset -g _joystick_surface=$(<"$cache")
+    return 0
   fi
-  typeset -g _joystick_surface=${_joystick_surface:-none}
+  # Not resolved yet — kick the lookup off the foreground path, once per shell.
+  if [[ ${TERM_PROGRAM:-} == ghostty && -z ${_joystick_surface_pending:-} ]]; then
+    typeset -g _joystick_surface_pending=1
+    ( osascript -e 'tell application "Ghostty" to get id of focused terminal of selected tab of front window' 2>/dev/null > "$cache" ) &!
+  fi
 }
 
 _joystick_preexec() {
@@ -45,8 +55,7 @@ _joystick_preexec() {
     [[ $PWD == ${~d} || $PWD == ${~d}/* ]] && return 0
   done
   _joystick_get_surface
-  local surface=$_joystick_surface
-  [[ $surface == none ]] && surface=""
+  local surface=${_joystick_surface:-}
   typeset -g _joystick_id="$$-$EPOCHSECONDS-$RANDOM"
   typeset -g _joystick_start=$EPOCHSECONDS
   local cmd cwd raw=$1
