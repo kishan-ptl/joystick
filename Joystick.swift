@@ -690,30 +690,35 @@ struct GroupRow: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 1) {
-                OpRow(op: group.current, nowTs: nowTs)
-                ForEach(group.history) { op in
-                    HStack(spacing: 0) {
-                        Spacer().frame(width: 43)  // align under the command text
-                        Text(historyLine(op))
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .opacity(0.65)
-                            .lineLimit(1)
-                        Spacer(minLength: 0)
-                    }
-                    .contentShape(Rectangle())
-                    // Right-clicking a specific history line copies that line's
-                    // command (innermost context menu wins over the row's).
-                    .contextMenu { copyMenu(for: op) }
+        // Not a Button: SwiftUI text selection can't work inside one (the button
+        // swallows the drag). Instead the text is selectable — drag to highlight,
+        // ⌘C to copy — and a *tap* focuses the tab. A TapGesture only fires on a
+        // click without movement, so a drag selects text and never focuses; it's
+        // simultaneous so a plain click still focuses even when it lands directly
+        // on selectable text.
+        VStack(alignment: .leading, spacing: 1) {
+            OpRow(op: group.current, nowTs: nowTs)
+            ForEach(group.history) { op in
+                HStack(spacing: 0) {
+                    Spacer().frame(width: 43)  // align under the command text
+                    Text(historyLine(op))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .opacity(0.65)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
                 }
+                .contentShape(Rectangle())
+                // Right-clicking a specific history line copies that line's
+                // command (innermost context menu wins over the row's).
+                .contextMenu { copyMenu(for: op) }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .help("Click to focus this tab in Ghostty · right-click to copy")
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .textSelection(.enabled)
+        .contentShape(Rectangle())
+        .simultaneousGesture(TapGesture().onEnded { action() })
+        .help("Click to focus this tab in Ghostty · drag to select · right-click to copy")
         .contextMenu { copyMenu(for: group.current) }
     }
 
