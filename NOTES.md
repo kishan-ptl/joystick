@@ -75,8 +75,9 @@ gets you back to the right tab in under a second.
 - [ ] Launch at login; Sparkle auto-updates
 
 ### v0.3
-- [ ] Document the event format; `joystick log` CLI for custom events
-      (EAS webhooks → ntfy/joystick for --no-wait builds)
+- [x] Document the event format (EVENTS.md) + `joystick log` CLI for custom
+      events — SHIPPED 2026-06-13. (EAS webhook → `joystick log done …` now
+      works for --no-wait/cloud builds; viewer keeps external tty=cli events.)
 - [ ] Other agent CLIs: Codex, Gemini
 - [ ] Focus adapters: iTerm2/Terminal.app (AppleScript), tmux switch-client,
       VS Code deep links

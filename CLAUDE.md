@@ -16,6 +16,7 @@ shared state and doubles as the future integration API.
 - **Emitters** (tiny, stateless, fail-silent) append events:
   - `joystick.zsh` — zsh preexec/precmd hooks (`_joystick_*`), sourced from `~/.zshrc`.
   - `claude-hook.sh` — Claude Code hooks (UserPromptSubmit/Stop/Notification/PostToolUse) in `~/.claude/settings.json`.
+  - `joystick` CLI (`joystick log …`, tty `cli`) — external events from CI, webhooks, Makefiles. Symlinked onto PATH at `~/.local/bin/joystick`. Schema + usage in `EVENTS.md`.
 - **Event log** — `~/.local/state/joystick/events.jsonl`, append-only JSONL,
   one source of truth. Events: `start` / `end` / `waiting` / `active`.
   Fields: id, cmd, cwd, pid, tty, surface, ts, exit, dur, msg. `chmod 600`.
