@@ -15,11 +15,12 @@ shared state and doubles as the future integration API.
 
 - **Emitters** (tiny, stateless, fail-silent) append events:
   - `joystick.zsh` — zsh preexec/precmd hooks (`_joystick_*`), sourced from `~/.zshrc`.
-  - `claude-hook.sh` — Claude Code hooks (UserPromptSubmit/Stop/Notification/PostToolUse) in `~/.claude/settings.json`.
+  - `claude-hook.sh` — Claude Code hooks (UserPromptSubmit / Stop(+StopFailure) / Notification / PostToolUse(+…Failure)) in `~/.claude/settings.json`. On turn close it also emits a `meta` event (session title/model/mode/context) and attaches Claude's closing blurb as `msg` on the `end` event.
   - `joystick` CLI (`joystick log …`, tty `cli`) — external events from CI, webhooks, Makefiles. Symlinked onto PATH at `~/.local/bin/joystick`. Schema + usage in `EVENTS.md`.
 - **Event log** — `~/.local/state/joystick/events.jsonl`, append-only JSONL,
-  one source of truth. Events: `start` / `end` / `waiting` / `active`.
-  Fields: id, cmd, cwd, pid, tty, surface, ts, exit, dur, msg. `chmod 600`.
+  one source of truth. Events: `start` / `end` / `waiting` / `active` / `meta`.
+  Fields: id, cmd, cwd, pid, tty, surface, ts, exit, dur, msg (+ `meta` carries
+  title, model, mode, ctx). `chmod 600`.
 - **Viewer** — `Joystick.app` (SwiftUI), source `Joystick.swift`, built by
   `build-app.sh` → `~/Applications/Joystick.app`. Owns both the menubar
   (`MenuBarExtra`) and the window. (A SwiftBar python plugin was the original

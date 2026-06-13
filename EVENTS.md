@@ -19,6 +19,8 @@ Each operation is two events sharing an `id` — a `start` and an `end`.
 // waiting / active  (optional — drives the amber "needs you" state)
 {"v":1,"ev":"waiting","id":"<id>","msg":"<why>","ts":<unix>}
 {"v":1,"ev":"active","id":"<id>","ts":<unix>}
+// meta  (Claude only — emitted on turn close; session-level, not per-turn)
+{"v":1,"ev":"meta","id":"<id>","title":"<topic>","model":"<id>","mode":"<perm-mode>","ctx":<tokens>,"ts":<unix>}
 ```
 
 > **Line-size invariant (load-bearing):** keep every line **under ~4096 bytes
@@ -41,6 +43,7 @@ Each operation is two events sharing an `id` — a `start` and an `end`.
 | `surface` | Ghostty surface id, for click-to-focus |
 | `ts` | unix seconds |
 | `exit` / `dur` / `msg` | end status / duration / reason (waiting why, or Claude's closing blurb on `end`) |
+| `title` / `model` / `mode` / `ctx` | `meta` only — session topic, model id, permission mode, context-window tokens used |
 
 ## Producers
 
