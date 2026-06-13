@@ -98,16 +98,23 @@ close_turn() {  # $1 = exit code  $2 = notify title  $3 = notify verb
 # input + cache_read + cache_creation). Runs on turn close (async).
 # $1 = the transcript path close_turn already resolved (empty if none).
 emit_meta() {  # $1 = transcript path (may be empty)
-  local tpath=$1 title mode model ctx
+  local tpath=$1 title mode model ctx name color
   [[ -n $tpath ]] || return 0
   title=$(grep -F '"type":"ai-title"' "$tpath" 2>/dev/null | tail -1 | jq -r '.aiTitle // empty' 2>/dev/null)
   mode=$(grep -F '"type":"permission-mode"' "$tpath" 2>/dev/null | tail -1 | jq -r '.permissionMode // empty' 2>/dev/null)
   model=$(tail -100 "$tpath" | jq -r 'select(.message.model != null) | .message.model' 2>/dev/null | tail -1)
   ctx=$(tail -100 "$tpath" | jq -r 'select(.message.usage != null) | .message.usage | (.input_tokens + .cache_read_input_tokens + .cache_creation_input_tokens)' 2>/dev/null | tail -1)
+  # A deliberate rename (custom-title) + assigned agent color, if you set them.
+  # The viewer shows these as a badge atop the row — distinct from the auto
+  # ai-title above (which is the row's label). The auto title is NOT the badge.
+  name=$(grep -F '"type":"custom-title"' "$tpath" 2>/dev/null | tail -1 | jq -r '.customTitle // empty' 2>/dev/null)
+  color=$(grep -F '"type":"agent-color"' "$tpath" 2>/dev/null | tail -1 | jq -r '.agentColor // empty' 2>/dev/null)
   [[ -n $title ]] && { _joystick_redact "$title"; title=${REPLY[1,80]}; }
+  [[ -n $name  ]] && { _joystick_redact "$name";  name=${REPLY[1,40]}; }
+  [[ -n $color ]] && color=${color[1,16]}   # a palette name; cap, no redaction needed
   jq -cn --arg id "$id" --arg title "${title:-}" --arg model "${model:-}" --arg mode "${mode:-}" \
-    --argjson ctx "${ctx:-0}" --argjson ts "$now" \
-    '{v:1,ev:"meta",id:$id,title:$title,model:$model,mode:$mode,ctx:$ctx,ts:$ts}' >> "$LOG"
+    --arg name "${name:-}" --arg color "${color:-}" --argjson ctx "${ctx:-0}" --argjson ts "$now" \
+    '{v:1,ev:"meta",id:$id,title:$title,model:$model,mode:$mode,name:$name,color:$color,ctx:$ctx,ts:$ts}' >> "$LOG"
 }
 
 case $event in

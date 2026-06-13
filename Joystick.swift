@@ -29,6 +29,8 @@ struct RawEvent: Decodable {
     let model: String?     // model id, on `meta` events
     let mode: String?      // permission mode, on `meta` events
     let ctx: Double?       // context-window tokens used, on `meta` events
+    let name: String?      // user-set session title (rename), on `meta` events
+    let color: String?     // user-set session color (agent color), on `meta` events
 }
 
 struct Op: Identifiable {
@@ -54,6 +56,8 @@ struct Op: Identifiable {
     var model = ""                    // model id (from meta events)
     var mode = ""                     // permission mode (from meta events)
     var ctxTokens: Double = 0         // context-window fill (from meta events)
+    var sessionName = ""              // user-given session title (rename), from meta
+    var agentColor = ""               // user-given session color name, from meta
 
     var id: String { "\(key)-\(Int(start))" }
     var isRunning: Bool { endTs == nil }
@@ -78,7 +82,7 @@ struct SurfaceGroup: Identifiable {
 }
 
 // Per-session metadata from the transcript (`meta` events), keyed by claude-<sid>.
-struct SessionMeta { var title = ""; var model = ""; var mode = ""; var ctx: Double = 0 }
+struct SessionMeta { var title = ""; var model = ""; var mode = ""; var ctx: Double = 0; var name = ""; var color = "" }
 
 // MARK: - Store
 
@@ -288,6 +292,7 @@ final class Store: ObservableObject {
             var g = g
             g.current.title = m.title; g.current.model = m.model
             g.current.mode = m.mode; g.current.ctxTokens = m.ctx
+            g.current.sessionName = m.name; g.current.agentColor = m.color
             return g
         }
         activeGroups = active.map(withMeta)
@@ -496,7 +501,8 @@ final class Store: ObservableObject {
             // attached to the group's current op at render time. Emitted AFTER
             // the end event, so the op is already in `done` — keep it separate.
             parsedMeta[e.id] = SessionMeta(title: e.title ?? "", model: e.model ?? "",
-                                           mode: e.mode ?? "", ctx: e.ctx ?? 0)
+                                           mode: e.mode ?? "", ctx: e.ctx ?? 0,
+                                           name: e.name ?? "", color: e.color ?? "")
         default:
             break
         }
@@ -714,6 +720,27 @@ func copyToPasteboard(_ s: String) {
 // amber needs-you hand, but the sparkle shape + motion keep the two apart.
 extension Color {
     static let claudeOrange = Color(red: 217 / 255, green: 119 / 255, blue: 87 / 255)
+
+    // Claude's named session ("agent") colors → SwiftUI colors, for tinting the
+    // rename badge. Unknown/empty names return nil so the badge stays neutral.
+    static func claudeAgent(_ name: String) -> Color? {
+        switch name.lowercased() {
+        case "red":             return .red
+        case "orange":          return .orange
+        case "yellow":          return .yellow
+        case "green":           return .green
+        case "mint":            return .mint
+        case "teal":            return .teal
+        case "cyan":            return .cyan
+        case "blue":            return .blue
+        case "indigo":          return .indigo
+        case "purple":          return .purple
+        case "pink", "magenta": return .pink
+        case "brown":           return .brown
+        case "gray", "grey":    return .gray
+        default:                return nil
+        }
+    }
 }
 
 // The twinkling asterisk Claude shows while thinking, reproduced as a breathing
@@ -744,6 +771,34 @@ func shortModel(_ m: String) -> String {
     if l.contains("haiku") { return "Haiku" }
     if l.contains("fable") { return "Fable" }
     return m
+}
+
+// A user-given session name (a deliberate Claude rename) shown as a small chip
+// atop the row. It's identity, not state — a tag, not a signal. When the
+// session also has an agent color, the chip adopts it (icon + fill + outline);
+// the label text stays in the default color so it's legible at any hue (a
+// yellow chip mustn't mean yellow, unreadable text). With no color it's a quiet
+// neutral gray, deliberately staying out of the ✋/▶/◉ status palette.
+struct RenameBadge: View {
+    let name: String
+    let tint: Color?   // session's agent color, nil = neutral
+
+    var body: some View {
+        let c = tint ?? .secondary
+        HStack(spacing: 3) {
+            Image(systemName: "tag.fill")
+                .font(.system(size: 8))
+                .foregroundStyle(c)
+            Text(name)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(tint == nil ? Color.secondary : Color.primary)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 1)
+        .background(Capsule().fill(c.opacity(0.15)))
+        .overlay(Capsule().strokeBorder(c.opacity(tint == nil ? 0 : 0.45), lineWidth: 0.75))
+    }
 }
 
 struct OpRow: View {
@@ -858,6 +913,14 @@ struct GroupRow: View {
         // So: text is NOT selectable; the whole row is a plain click → focus,
         // and copy lives in the right-click menu (whole command / directory).
         VStack(alignment: .leading, spacing: 1) {
+            if !group.current.sessionName.isEmpty {
+                HStack(spacing: 0) {
+                    Spacer().frame(width: 43)   // align the chip over the command text
+                    RenameBadge(name: group.current.sessionName,
+                                tint: Color.claudeAgent(group.current.agentColor))
+                    Spacer(minLength: 0)
+                }
+            }
             OpRow(op: group.current, nowTs: nowTs)
             ForEach(group.history) { op in
                 HStack(spacing: 0) {
