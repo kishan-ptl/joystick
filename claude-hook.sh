@@ -60,10 +60,21 @@ case $event in
       surface=$(osascript -e 'tell application "Ghostty" to get id of focused terminal of selected tab of front window' 2>/dev/null) || surface=""
       [[ -n $surface ]] && print -r -- "$surface" > "$scache"
     fi
+    # The session's long-lived claude pid is stable across all its turns, so
+    # resolve it once (the ps walk) and cache by sid. Only cache a confidently
+    # resolved claude/node pid — never the $PPID fallback, which can be a
+    # transient that would make the row look dead on the next turn.
+    pcache="${LOG:h}/cpid-$sid" cpid=""
+    [[ -s $pcache ]] && cpid=$(<"$pcache")
+    if [[ -z $cpid || $cpid == *[!0-9]* ]]; then
+      cpid=$(claude_pid)
+      comm=$(ps -o comm= -p "$cpid" 2>/dev/null)
+      case "${comm:t}" in claude*|node*) print -r -- "$cpid" > "$pcache" ;; esac
+    fi
     # The 120-char prompt cap keeps the line < PIPE_BUF (4096) so concurrent
     # appends from other shells/hooks stay atomic — don't raise it materially.
     jq -cn --arg id "$id" --arg cmd "🤖 ${prompt[1,120]}" --arg cwd "$cwd" \
-      --arg surface "$surface" --argjson pid "$(claude_pid)" --argjson ts "$now" \
+      --arg surface "$surface" --argjson pid "$cpid" --argjson ts "$now" \
       '{v:1,kind:"claude",ev:"start",id:$id,cmd:$cmd,cwd:$cwd,pid:$pid,tty:"",surface:$surface,ts:$ts}' >> "$LOG"
     ;;
   Stop)

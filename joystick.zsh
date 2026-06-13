@@ -23,7 +23,7 @@ source "$HOME/joystick/joystick-redact.zsh"
 if [[ -f $JOYSTICK_LOG ]] && (( $(stat -f %z "$JOYSTICK_LOG" 2>/dev/null || echo 0) > 5242880 )); then
   tail -n 2000 "$JOYSTICK_LOG" > "$JOYSTICK_LOG.tmp" && mv "$JOYSTICK_LOG.tmp" "$JOYSTICK_LOG"
 fi
-command find "${JOYSTICK_LOG:h}" \( -name 'surface-*' -o -name 'waiting-*' \) -mtime +7 -delete 2>/dev/null
+command find "${JOYSTICK_LOG:h}" \( -name 'surface-*' -o -name 'waiting-*' -o -name 'cpid-*' \) -mtime +7 -delete 2>/dev/null
 # Clear any stale surface cache for this PID (guards against PID reuse).
 command rm -f "${JOYSTICK_LOG:h}/surface-shell-$$" 2>/dev/null
 
