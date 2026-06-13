@@ -138,7 +138,7 @@ final class Store: ObservableObject {
     private var reloadDebounce: DispatchWorkItem?
     private var activeTick: Timer?
     private var backstopTimer: Timer?
-    // 1 Hz sampler for the focused-tab highlight, live ONLY while Ghostty is
+    // 4 Hz sampler for the focused-tab highlight, live ONLY while Ghostty is
     // frontmost (started/stopped by focusObserver). Catches tab/split switches,
     // which don't change the frontmost app; off at rest, so it doesn't regress
     // the log-watch model's quiet.
@@ -178,7 +178,7 @@ final class Store: ObservableObject {
 
     // Make the focused-tab highlight responsive without a perpetual poll. The
     // instant Ghostty becomes frontmost we sample immediately (switching INTO
-    // Ghostty feels instant), then tick at 1 Hz to catch tab/split switches
+    // Ghostty feels instant), then tick at 4 Hz to catch tab/split switches
     // within Ghostty (those don't fire an app-activation notification). When any
     // other app takes over we stop ticking — nothing fires at rest.
     private func startFocusTracking() {
@@ -194,13 +194,13 @@ final class Store: ObservableObject {
         updateFocusTick(NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.mitchellh.ghostty")
     }
 
-    // Start/stop the 1 Hz focus sampler. Idempotent. Does NOT clear
+    // Start/stop the 4 Hz focus sampler. Idempotent. Does NOT clear
     // focusedSurface on stop — the highlight holds on the last tab you were in.
     private func updateFocusTick(_ ghosttyFront: Bool) {
         if ghosttyFront {
             pollFocusedSurface()   // immediate, so switching INTO Ghostty is instant
             guard focusTick == nil else { return }
-            focusTick = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            focusTick = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.pollFocusedSurface() }
             }
         } else {
@@ -687,11 +687,11 @@ final class Store: ObservableObject {
     // While the user is actually in Ghostty, whatever surface is focused is
     // being viewed — stamp it (and highlight its row). Cheap AppleScript, only
     // when Ghostty is frontmost (a background tab isn't "viewed"). Paced by the
-    // focus tick (see updateFocusTick) at ~1 Hz; the 0.75s floor just dedupes
+    // focus tick (see updateFocusTick) at ~4 Hz; the 0.2s floor just dedupes
     // the overlap with reload()'s call while an op is running.
     private func pollFocusedSurface() {
         guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.mitchellh.ghostty",
-              Date().timeIntervalSince(lastFocusPoll) >= 0.75 else { return }
+              Date().timeIntervalSince(lastFocusPoll) >= 0.2 else { return }
         lastFocusPoll = Date()
         DispatchQueue.global(qos: .utility).async {
             let id = Self.fetchFocusedSurfaceId()
