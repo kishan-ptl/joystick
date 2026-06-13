@@ -48,9 +48,9 @@ The big one. Fold the SwiftBar plugin into the Swift app.
 - **Notifications**: migrate from `osascript` to `UNUserNotificationCenter` —
   request authorization on first launch; make them **actionable** (click →
   focus the tab) via a notification action that calls the existing focus logic.
-- **Dock vs menubar-only**: going `LSUIElement` (menubar-only, no Dock icon)
-  is cleaner, but the unseen **Dock badge** needs Dock presence. Resolve by
-  moving the unseen indicator into the menubar label, then go `LSUIElement`.
+- **Dock vs menubar-only**: DECIDED 2026-06-13 — **keep both** Dock and
+  menubar (not `LSUIElement`). The menubar shows current activity; the Dock
+  icon carries the unseen-count badge. This is already the behavior.
 - **Delete** when done: `joystick.5s.py`, the `~/.config/swiftbar/` symlink,
   and SwiftBar from setup docs. (History keeps the python as reference.)
 - Keep SwiftBar working in parallel until the MenuBarExtra reaches parity, then
@@ -120,7 +120,7 @@ The big one. Fold the SwiftBar plugin into the Swift app.
 |---|---|---|
 | Emitter install location (`$JOYSTICK_HOME`) | chunks 2,3,4 | `~/.config/joystick`, copied from bundle |
 | App sandbox on/off | chunk 4 | OFF → Developer ID, not App Store |
-| Dock badge vs `LSUIElement` | chunk 1 | menubar-only; unseen count in the label |
+| Dock badge vs `LSUIElement` | chunk 1 | DECIDED: keep both Dock + menubar |
 | Drop python/SwiftBar entirely? | chunk 1 | yes for v0.1 (Ghostty-first) |
 | Final name + icon | chunk 5 | TBD |
 
