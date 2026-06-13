@@ -182,11 +182,26 @@ final class Store: ObservableObject {
                 .prefix(Self.maxDone)
         )
 
-        // Closing a tab IS the dismiss gesture: finished ops whose Ghostty
-        // surface no longer exists are dropped entirely (noise, not history).
+        // Closing a tab IS the dismiss gesture: a finished op is dropped once
+        // its hosting terminal is gone (noise, not history). How we know it's
+        // gone differs by kind — and a Claude row can't use the surface gate:
+        //   shell  — its Ghostty surface no longer exists. The surface id is a
+        //            reliable per-shell capture and UUIDs are never reused, so
+        //            this never wrongly keeps or drops a row.
+        //   claude — its session process has exited. A Claude row's surface is
+        //            only a best-effort focused-surface snapshot (captured once
+        //            on the session's first prompt); it can point at the WRONG,
+        //            still-open pane, which would keep a closed session's rows
+        //            alive forever. The claude/node pid can't outlive its pane
+        //            (Ghostty SIGHUPs it on close), so pid-liveness is the
+        //            trustworthy "is the host still here?" signal.
+        //   external — no local host; TTL-gated above, never dropped here.
         pollLiveSurfaces()
-        if let live = liveSurfaces {
-            finished.removeAll { !$0.isExternal && !live.contains($0.surface) }
+        finished.removeAll { op in
+            if op.isExternal { return false }
+            if op.isClaude { return !alive(op.pid) }
+            guard let live = liveSurfaces else { return false }
+            return !live.contains(op.surface)
         }
 
         // Unread badges: a finished op is unseen until its surface has been
