@@ -219,12 +219,14 @@ for d in done[::-1]:  # newest first
 done = [grouped[k] for k in gorder][:MAX_DONE]
 
 # --- menubar title ---
-# Compact: glyph + count only (full detail lives in the dropdown). State glyph
-# is preserved (principle #5) so ✋ needs-you / ▶ working / ◉ serving still read
-# at a glance; idle shows the 🕹 brand mark.
+# Compact glyph + count. Monochrome and quiet by default so it sits unobtrusively
+# in a crowded bar; the one "spark accent" is amber on ✋ when something needs you,
+# so the icon only draws the eye when you're actually being waited on. Working/
+# serving stay neutral — their shape (▶/◉) carries the state (principle #5).
+AMBER = "#E0A24E"
 waiting_n = sum(1 for s in running if is_waiting(s))
 if waiting_n:
-    print(f"✋ {waiting_n}")
+    print(f"✋ {waiting_n} | color={AMBER}")
 elif running:
     nonsvc = [s for s in running if not s.get("service")]
     if nonsvc:
