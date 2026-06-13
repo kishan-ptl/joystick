@@ -24,10 +24,9 @@ gets you back to the right tab in under a second.
   - `joystick.zsh` — zsh preexec/precmd hooks (sourced from ~/.zshrc)
   - `claude-hook.sh` — Claude Code hooks (UserPromptSubmit/Stop/Notification/
     PostToolUse in ~/.claude/settings.json)
-- Viewers:
-  - `~/Applications/Joystick.app` — SwiftUI (source: Joystick.swift, build:
-    build-app.sh)
-  - `~/.config/swiftbar/joystick.1s.py` — SwiftBar menubar plugin
+- Viewer: `~/Applications/Joystick.app` — SwiftUI (source: Joystick.swift,
+  build: build-app.sh). Owns both the menubar (MenuBarExtra) and the window.
+  (SwiftBar python plugin retired 2026-06-13; preserved in git history.)
 - Click-to-focus: `joystick-focus.sh` — AppleScript, exact Ghostty surface id,
   cwd fallback.
 - Waiting detection:
@@ -54,8 +53,9 @@ gets you back to the right tab in under a second.
 ## Roadmap
 
 ### v0.1 — shareable (1–2 weekends)
-- [ ] One app: MenuBarExtra absorbs the SwiftBar plugin (menubar + window +
-      notifications in a single .app; drop SwiftBar/python dependency)
+- [x] One app: MenuBarExtra owns the menubar; SwiftBar plugin retired
+      (2026-06-13). Notifications still osascript → UNUserNotificationCenter
+      deferred to chunk 4 (needs signing).
 - [ ] First-run onboarding: buttons to install shell integration (.zshrc),
       Claude hooks (settings.json merge), Ghostty notify config; demo with
       `sleep 8` so it works in the first 30 seconds
@@ -165,11 +165,8 @@ annoyances are the real v0.2.
   next prompt overwrites it (Stop hook doesn't fire on interrupt)
 - Ad-hoc codesigning → TCC automation re-prompts after each rebuild (fixed by
   real Developer ID signing in v0.1)
-- Two viewers duplicate parse/filter logic (Swift + python) — accepted until
-  MenuBarExtra absorbs the SwiftBar plugin in v0.1
 - 1s timer polling (mtime-gated since 2026-06-12 review, so cheap) — FSEvents
   is the proper fix, v0.1
-- SwiftBar plugin runs osascript (live surfaces) every 5s refresh
 - Dev note: SourceKit flags "'main' attribute cannot be used..." on
   Joystick.swift — false positive; build-app.sh passes -parse-as-library
 

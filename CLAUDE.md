@@ -19,9 +19,10 @@ shared state and doubles as the future integration API.
 - **Event log** — `~/.local/state/joystick/events.jsonl`, append-only JSONL,
   one source of truth. Events: `start` / `end` / `waiting` / `active`.
   Fields: id, cmd, cwd, pid, tty, surface, ts, exit, dur, msg. `chmod 600`.
-- **Viewers** (read-only over the log):
-  - `Joystick.app` (SwiftUI) — source `Joystick.swift`, built by `build-app.sh` → `~/Applications/Joystick.app`.
-  - `joystick.1s.py` — SwiftBar plugin, symlinked into `~/.config/swiftbar/`.
+- **Viewer** — `Joystick.app` (SwiftUI), source `Joystick.swift`, built by
+  `build-app.sh` → `~/Applications/Joystick.app`. Owns both the menubar
+  (`MenuBarExtra`) and the window. (A SwiftBar python plugin was the original
+  menubar; retired 2026-06-13 — recoverable from git history if ever needed.)
 - **Interaction** — `joystick-focus.sh` (AppleScript): click a row → focus that
   exact Ghostty surface (by id; cwd fallback; reopen if the tab is gone).
 
