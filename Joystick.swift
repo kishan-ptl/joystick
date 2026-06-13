@@ -88,6 +88,11 @@ final class Store: ObservableObject {
     @Published var idleGroups: [SurfaceGroup] = []
     @Published var now = Date()
     @Published var commandsToday = 0   // shell + Claude turns started today (local time)
+    // Surface id of the Ghostty tab/split focused right now (or most recently,
+    // while you're away in another app — we deliberately DON'T clear it on blur,
+    // so the highlight keeps pointing at "where you were" — that's the get-back-
+    // to-the-right-tab use case). Drives the focused-row highlight in GroupRow.
+    @Published var focusedSurface: String? = nil
 
     static let minRunningSecs = 5.0
     static let minDoneSecs = 10.0
@@ -630,6 +635,7 @@ final class Store: ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 guard let self, let id, !id.isEmpty else { return }
                 self.seenAt[id] = Date().timeIntervalSince1970
+                self.focusedSurface = id   // highlight this row; not cleared on blur
                 // In-memory state updates every sample; disk persistence only
                 // needs to survive restarts, so write only on focus change.
                 if self.lastPersistedFocus != id {
@@ -846,7 +852,18 @@ struct OpRow: View {
 struct GroupRow: View {
     let group: SurfaceGroup
     let nowTs: Double
+    var focusedSurface: String? = nil
     let action: () -> Void
+
+    // Is this the Ghostty tab/split focused right now? Shell rows group BY
+    // surface (group.key), so that's an exact hit. Claude rows group by
+    // claude-<sid> and carry only a best-effort surface snapshot on current.surface
+    // — match that too, so Claude rows highlight when the snapshot is good and
+    // simply don't when it's stale (graceful, consistent with how that data behaves).
+    private var isFocused: Bool {
+        guard let f = focusedSurface, !f.isEmpty else { return false }
+        return f == group.key || f == group.current.surface
+    }
 
     var body: some View {
         // One-tap focus is THE feature, so it has to be rock-solid. We tried
@@ -880,6 +897,16 @@ struct GroupRow: View {
         .onTapGesture { action() }
         .help("Click to focus this tab in Ghostty · right-click to copy")
         .contextMenu { copyMenu(for: group.current) }
+        // "You are here": tint the row for the surface focused in Ghostty right
+        // now. A leading accent bar + faint fill — deliberately NOT a glyph
+        // color, so it never competes with the ✋/▶/◉/✓/✗ state vocabulary.
+        .listRowBackground(
+            HStack(spacing: 0) {
+                Rectangle().fill(Color.accentColor).frame(width: 3)
+                Color.accentColor.opacity(0.12)
+            }
+            .opacity(isFocused ? 1 : 0)
+        )
     }
 
     // Right-click → copy. Command first (the row's main text), then its
@@ -985,14 +1012,14 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(store.activeGroups) { g in
-                        GroupRow(group: g, nowTs: nowTs) { store.focus(g.current) }
+                        GroupRow(group: g, nowTs: nowTs, focusedSurface: store.focusedSurface) { store.focus(g.current) }
                     }
                 }
             }
             if !store.idleGroups.isEmpty {
                 Section("Finished") {
                     ForEach(store.idleGroups) { g in
-                        GroupRow(group: g, nowTs: nowTs) { store.focus(g.current) }
+                        GroupRow(group: g, nowTs: nowTs, focusedSurface: store.focusedSurface) { store.focus(g.current) }
                     }
                 }
             }
