@@ -573,17 +573,19 @@ func tilde(_ path: String) -> String {
 
 // MARK: - Views
 
+// Claude's brand orange (#D97757). Used for the thinking sparkle and the
+// matching elapsed-time on an in-flight Claude row. The warm hue sits near the
+// amber needs-you hand, but the sparkle shape + motion keep the two apart.
+extension Color {
+    static let claudeOrange = Color(red: 217 / 255, green: 119 / 255, blue: 87 / 255)
+}
+
 // The twinkling asterisk Claude shows while thinking, reproduced as a breathing
 // star so a working Claude row reads at a glance. Frame-cycled (not tweened) to
-// match the terminal spinner, in Claude's brand orange. (This warm hue sits
-// near the amber needs-you hand, but the sparkle shape + motion keep them apart.)
+// match the terminal spinner, in Claude's brand orange.
 struct ClaudeThinkingIcon: View {
     private static let frames = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"]
     private static let interval = 0.16
-    // Claude's brand orange (#D97757). The warm hue is here by request — the
-    // animated sparkle shape still distinguishes it from the static amber
-    // needs-you hand.
-    private static let claudeOrange = Color(red: 217 / 255, green: 119 / 255, blue: 87 / 255)
 
     var body: some View {
         // TimelineView drives the redraw and naturally pauses when the row
@@ -592,7 +594,7 @@ struct ClaudeThinkingIcon: View {
             let step = Int(context.date.timeIntervalSinceReferenceDate / Self.interval)
             Text(Self.frames[step % Self.frames.count])
                 .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(Self.claudeOrange)
+                .foregroundStyle(Color.claudeOrange)
                 .frame(width: 16, height: 16)   // fixed box so glyph width can't jitter the row
         }
     }
@@ -622,6 +624,7 @@ struct OpRow: View {
             Text(timeText)
                 .font(.system(.callout, design: .monospaced).weight(.medium))
                 .foregroundStyle(op.isService ? Color.green
+                                 : (op.isRunning && op.isClaude && !op.isWaiting) ? Color.claudeOrange
                                  : op.isRunning ? Color.accentColor : .secondary)
         }
         .padding(.vertical, 3)
