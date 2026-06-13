@@ -485,6 +485,27 @@ func tilde(_ path: String) -> String {
 
 // MARK: - Views
 
+// The twinkling asterisk Claude shows while thinking, reproduced as a breathing
+// star so a working Claude row reads at a glance. Frame-cycled (not tweened) to
+// match the terminal spinner. Stays in the "working = blue" vocabulary — amber
+// is reserved for needs-you, so we deliberately don't use Claude's warm orange.
+struct ClaudeThinkingIcon: View {
+    private static let frames = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"]
+    private static let interval = 0.11
+
+    var body: some View {
+        // TimelineView drives the redraw and naturally pauses when the row
+        // isn't on screen — no manual Timer to leak or reset on every reload.
+        TimelineView(.periodic(from: .now, by: Self.interval)) { context in
+            let step = Int(context.date.timeIntervalSinceReferenceDate / Self.interval)
+            Text(Self.frames[step % Self.frames.count])
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.blue)
+                .frame(width: 16, height: 16)   // fixed box so glyph width can't jitter the row
+        }
+    }
+}
+
 struct OpRow: View {
     let op: Op
     let nowTs: Double
@@ -520,6 +541,8 @@ struct OpRow: View {
                 Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
             } else if op.isService {
                 Image(systemName: "antenna.radiowaves.left.and.right").foregroundStyle(.green)
+            } else if op.isRunning && op.isClaude {
+                ClaudeThinkingIcon()   // twinkling sparkle while a turn is in flight
             } else if op.isRunning {
                 Image(systemName: "play.circle.fill").foregroundStyle(.blue)
             } else if op.exitCode == 0 {
