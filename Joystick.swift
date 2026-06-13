@@ -473,36 +473,30 @@ func tilde(_ path: String) -> String {
 struct OpRow: View {
     let op: Op
     let nowTs: Double
-    let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            HStack(alignment: .center, spacing: 10) {
-                Circle()
-                    .fill(Color.blue)
-                    .frame(width: 7, height: 7)
-                    .opacity(op.unseen ? 1 : 0)
-                statusIcon
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(op.cmd)
-                        .font(.system(.body, design: .monospaced))
-                        .lineLimit(1)
-                    Text(subtitle)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 12)
-                Text(timeText)
-                    .font(.system(.callout, design: .monospaced).weight(.medium))
-                    .foregroundStyle(op.isService ? Color.green
-                                     : op.isRunning ? Color.accentColor : .secondary)
+        HStack(alignment: .center, spacing: 10) {
+            Circle()
+                .fill(Color.blue)
+                .frame(width: 7, height: 7)
+                .opacity(op.unseen ? 1 : 0)
+            statusIcon
+            VStack(alignment: .leading, spacing: 2) {
+                Text(op.cmd)
+                    .font(.system(.body, design: .monospaced))
+                    .lineLimit(1)
+                Text(subtitle)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
-            .padding(.vertical, 3)
-            .contentShape(Rectangle())
+            Spacer(minLength: 12)
+            Text(timeText)
+                .font(.system(.callout, design: .monospaced).weight(.medium))
+                .foregroundStyle(op.isService ? Color.green
+                                 : op.isRunning ? Color.accentColor : .secondary)
         }
-        .buttonStyle(.plain)
-        .help("Click to focus this tab in Ghostty")
+        .padding(.vertical, 3)
     }
 
     private var statusIcon: some View {
@@ -552,19 +546,26 @@ struct GroupRow: View {
     let action: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            OpRow(op: group.current, nowTs: nowTs, action: action)
-            ForEach(group.history) { op in
-                HStack(spacing: 0) {
-                    Spacer().frame(width: 43)  // align under the command text
-                    Text(historyLine(op))
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .opacity(0.65)
-                        .lineLimit(1)
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 1) {
+                OpRow(op: group.current, nowTs: nowTs)
+                ForEach(group.history) { op in
+                    HStack(spacing: 0) {
+                        Spacer().frame(width: 43)  // align under the command text
+                        Text(historyLine(op))
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .opacity(0.65)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .help("Click to focus this tab in Ghostty")
     }
 
     private func historyLine(_ op: Op) -> String {
