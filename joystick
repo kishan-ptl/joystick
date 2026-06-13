@@ -1,0 +1,73 @@
+#!/bin/zsh
+# joystick — emit operation events into the Joystick dashboard from anywhere:
+# CI, webhooks, Makefiles, cron, or a long manual op. Events land in the same
+# log the terminal/Claude hooks write, so external work shows on the board
+# alongside your local tabs — even when no terminal is involved.
+#
+#   joystick log done  <name> [--exit N] [--took S]   completed op → Finished
+#   joystick log start <name> [--id ID]               begin a long op → running; prints its id
+#   joystick log end   <id>   [--exit N]              finish a started op
+#
+# Events are tagged tty="cli" so the viewer keeps them (they aren't tied to a
+# Ghostty tab). Names are sanitized via joystick-redact.zsh. Schema: EVENTS.md.
+
+emulate -L zsh
+zmodload zsh/datetime 2>/dev/null
+
+LOG="${XDG_STATE_HOME:-$HOME/.local/state}/joystick/events.jsonl"
+HERE=${0:A:h}
+mkdir -p "${LOG:h}"
+[[ -e $LOG ]] || { : >> "$LOG"; chmod 600 "$LOG" }
+[[ -f $HERE/joystick-redact.zsh ]] && source "$HERE/joystick-redact.zsh"
+
+_jl_redact() {
+  if (( ${+functions[_joystick_redact]} )); then _joystick_redact "$1"; print -r -- "$REPLY"
+  else print -r -- "$1"; fi
+}
+_jl_esc() {
+  local s=$1
+  s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\n'/ }; s=${s//$'\t'/ }; s=${s//[[:cntrl:]]/}
+  print -r -- "$s"
+}
+emit()  { print -r -- "$1" >> "$LOG" }
+newid() { print -r -- "cli-${EPOCHSECONDS}-${RANDOM}" }
+
+[[ ${1:-} == log ]] || {
+  print -u2 "usage: joystick log {done|start|end} <name|id> [--exit N] [--took S] [--id ID]"; exit 2
+}
+shift
+sub=${1:-}; [[ -n $sub ]] && shift
+
+exit_code=0 took=0 id="" parts=()
+while (( $# )); do
+  case $1 in
+    --exit) exit_code=${2:-0}; shift 2 ;;
+    --took) took=${2:-0};      shift 2 ;;
+    --id)   id=${2:-};         shift 2 ;;
+    *)      parts+=$1;         shift ;;
+  esac
+done
+name=${parts[*]}
+
+case $sub in
+  start)
+    [[ -n $name ]] || { print -u2 "joystick log start <name>"; exit 2 }
+    [[ -n $id ]] || id=$(newid)
+    name=$(_jl_esc "$(_jl_redact "$name")")
+    emit "{\"ev\":\"start\",\"id\":\"$id\",\"cmd\":\"$name\",\"cwd\":\"\",\"pid\":0,\"tty\":\"cli\",\"surface\":\"\",\"ts\":$EPOCHSECONDS}"
+    print -r -- "$id"
+    ;;
+  end)
+    [[ -n $id ]] || id=$name
+    [[ -n $id ]] || { print -u2 "joystick log end <id> [--exit N]"; exit 2 }
+    emit "{\"ev\":\"end\",\"id\":\"$id\",\"exit\":$exit_code,\"ts\":$EPOCHSECONDS}"
+    ;;
+  done)
+    [[ -n $name ]] || { print -u2 "joystick log done <name> [--exit N] [--took S]"; exit 2 }
+    id=$(newid)
+    name=$(_jl_esc "$(_jl_redact "$name")")
+    emit "{\"ev\":\"start\",\"id\":\"$id\",\"cmd\":\"$name\",\"cwd\":\"\",\"pid\":0,\"tty\":\"cli\",\"surface\":\"\",\"ts\":$(( EPOCHSECONDS - took ))}"
+    emit "{\"ev\":\"end\",\"id\":\"$id\",\"exit\":$exit_code,\"dur\":$took,\"ts\":$EPOCHSECONDS}"
+    ;;
+  *) print -u2 "joystick log {done|start|end} …"; exit 2 ;;
+esac

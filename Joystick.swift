@@ -45,6 +45,7 @@ struct Op: Identifiable {
     var isRunning: Bool { endTs == nil }
     var isWaiting: Bool { isRunning && (waitingSince != nil || stallIdle != nil) }
     var isClaude: Bool { tty == "claude" }
+    var isExternal: Bool { tty == "cli" }   // emitted by `joystick log` (CI/webhooks); no local pid or surface
 
     // Stable grouping identity. A Claude session keeps ONE id across all its
     // turns (claude-<sid>), so group by that — robust even when surface
@@ -73,6 +74,7 @@ final class Store: ObservableObject {
     static let minRunningSecs = 5.0
     static let minDoneSecs = 10.0
     static let doneWindowSecs = 6.0 * 3600
+    static let externalTTL = 24.0 * 3600   // running `joystick log` ops dropped after this with no end
     static let maxDone = 20
     static let historyCap = 3
     static let ignore: Set<String> = ["claude", "claude2", "vim", "nvim", "less", "man", "top", "htop", "tmux"]
@@ -123,7 +125,13 @@ final class Store: ObservableObject {
         parseLogIfChanged()
 
         var running = parsedOpen.values
-            .filter { alive($0.pid) && nowTs - $0.start >= Self.minRunningSecs && !ignored($0.cmd) }
+            .filter { op in
+                guard !ignored(op.cmd) else { return false }
+                // External ops (joystick log) have no local pid/surface — keep
+                // them until an `end` event arrives or the TTL elapses.
+                if op.isExternal { return nowTs - op.start < Self.externalTTL }
+                return alive(op.pid) && nowTs - op.start >= Self.minRunningSecs
+            }
 
         // Stall heuristic for shell ops (interactive prompts like `eas submit`):
         // tty produced no output for a while and its foreground process is
@@ -145,7 +153,7 @@ final class Store: ObservableObject {
         notifyNewlyWaiting(running: running)
 
         var finished = Array(
-            parsedDone.filter { ($0.dur ?? 0) >= Self.minDoneSecs
+            parsedDone.filter { ($0.isExternal || ($0.dur ?? 0) >= Self.minDoneSecs)
                 && nowTs - ($0.endTs ?? 0) <= Self.doneWindowSecs
                 && !ignored($0.cmd) }
                 .sorted { ($0.endTs ?? 0) > ($1.endTs ?? 0) }
@@ -156,7 +164,7 @@ final class Store: ObservableObject {
         // surface no longer exists are dropped entirely (noise, not history).
         pollLiveSurfaces()
         if let live = liveSurfaces {
-            finished.removeAll { !live.contains($0.surface) }
+            finished.removeAll { !$0.isExternal && !live.contains($0.surface) }
         }
 
         // Unread badges: a finished op is unseen until its surface has been
@@ -164,7 +172,7 @@ final class Store: ObservableObject {
         pollFocusedSurface()
         finished = finished.map { op -> Op in
             var op = op
-            op.unseen = (seenAt[op.surface] ?? 0) < (op.endTs ?? 0)
+            op.unseen = !op.isExternal && (seenAt[op.surface] ?? 0) < (op.endTs ?? 0)
             return op
         }
 
@@ -271,7 +279,7 @@ final class Store: ObservableObject {
     private func refreshTtyStates(ttys: Set<String>, nowTs: Double) {
         guard now.timeIntervalSince(lastStallCheck) >= 5 else { return }
         lastStallCheck = now
-        let candidates = ttys.filter { !$0.isEmpty && $0 != "claude" }
+        let candidates = ttys.filter { !$0.isEmpty && $0 != "claude" && $0 != "cli" }
         guard !candidates.isEmpty else { ttyStates = [:]; return }
         DispatchQueue.global(qos: .utility).async {
             var states: [String: TtyState] = [:]
