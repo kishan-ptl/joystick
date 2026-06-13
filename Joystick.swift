@@ -1043,7 +1043,7 @@ struct GroupRow: View {
         // dimmed Ghostty split — quiet on purpose, so it never competes with the
         // colored ✋/▶/◉/✓/✗ state glyphs.
         .listRowBackground(
-            isFocused ? Color(nsColor: .unemphasizedSelectedContentBackgroundColor)
+            isFocused ? Color(nsColor: .unemphasizedSelectedContentBackgroundColor).opacity(0.5)
                       : Color.clear
         )
     }
