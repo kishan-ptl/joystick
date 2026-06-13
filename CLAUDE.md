@@ -21,7 +21,7 @@ shared state and doubles as the future integration API.
   Fields: id, cmd, cwd, pid, tty, surface, ts, exit, dur, msg. `chmod 600`.
 - **Viewers** (read-only over the log):
   - `Joystick.app` (SwiftUI) — source `Joystick.swift`, built by `build-app.sh` → `~/Applications/Joystick.app`.
-  - `joystick.5s.py` — SwiftBar plugin, symlinked into `~/.config/swiftbar/`.
+  - `joystick.1s.py` — SwiftBar plugin, symlinked into `~/.config/swiftbar/`.
 - **Interaction** — `joystick-focus.sh` (AppleScript): click a row → focus that
   exact Ghostty surface (by id; cwd fallback; reopen if the tab is gone).
 

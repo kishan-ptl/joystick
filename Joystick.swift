@@ -95,11 +95,19 @@ final class Store: ObservableObject {
     private var lastFocusPoll = Date.distantPast
     // surface id -> last time it was focused while Ghostty was frontmost
     private var seenAt: [String: Double] = [:]
+    private var timer: Timer?
 
     init() {
         if let d = UserDefaults.standard.dictionary(forKey: "seenAt") as? [String: Double] {
             seenAt = d
         }
+        // Self-drive the refresh so the menubar stays live even when no window
+        // is open. (Previously the 1s timer lived in ContentView and only
+        // ticked while a window was visible.)
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reload() }
+        }
+        reload()
     }
 
     private var logURL: URL {
@@ -569,7 +577,6 @@ struct GroupRow: View {
 struct ContentView: View {
     @EnvironmentObject var store: Store
     @State private var floatOnTop = false
-    private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -578,13 +585,7 @@ struct ContentView: View {
             opList
         }
         .frame(minWidth: 400, minHeight: 320)
-        .onAppear {
-            store.reload()
-            if let w = NSApp.windows.first {
-                w.setFrameAutosaveName("JoystickMain")
-            }
-        }
-        .onReceive(timer) { _ in store.reload() }
+        .onAppear { store.reload() }
         .onChange(of: floatOnTop) { _, pinned in
             for w in NSApp.windows { w.level = pinned ? .floating : .normal }
         }
@@ -643,6 +644,27 @@ struct ContentView: View {
 
 // MARK: - App
 
+// Compact status shown in the menubar: an icon + count that reflects the most
+// urgent thing happening (needs-you > running > serving > idle).
+struct MenuBarLabel: View {
+    @ObservedObject var store: Store
+
+    var body: some View {
+        let waiting = store.activeGroups.filter { $0.current.isWaiting }.count
+        let serving = store.activeGroups.filter { $0.current.isService }.count
+        let running = store.activeGroups.count - serving
+        if waiting > 0 {
+            Label("\(waiting)", systemImage: "hand.raised.fill")
+        } else if running > 0 {
+            Label("\(running)", systemImage: "play.fill")
+        } else if serving > 0 {
+            Label("\(serving)", systemImage: "antenna.radiowaves.left.and.right")
+        } else {
+            Image(systemName: "gamecontroller")
+        }
+    }
+}
+
 @main
 struct JoystickApp: App {
     @StateObject private var store = Store()
@@ -651,5 +673,15 @@ struct JoystickApp: App {
         WindowGroup("Joystick") {
             ContentView().environmentObject(store)
         }
+
+        // The app now owns the menubar itself (replacing the SwiftBar plugin).
+        MenuBarExtra {
+            ContentView()
+                .environmentObject(store)
+                .frame(width: 380, height: 460)
+        } label: {
+            MenuBarLabel(store: store)
+        }
+        .menuBarExtraStyle(.window)
     }
 }

@@ -219,22 +219,23 @@ for d in done[::-1]:  # newest first
 done = [grouped[k] for k in gorder][:MAX_DONE]
 
 # --- menubar title ---
-# Compact glyph + count. Monochrome and quiet by default so it sits unobtrusively
-# in a crowded bar; the one "spark accent" is amber on ✋ when something needs you,
-# so the icon only draws the eye when you're actually being waited on. Working/
-# serving stay neutral — their shape (▶/◉) carries the state (principle #5).
-AMBER = "#E0A24E"
-waiting_n = sum(1 for s in running if is_waiting(s))
-if waiting_n:
-    print(f"✋ {waiting_n} | color={AMBER}")
+# A single dot; its color is the state, and it blinks (a ~1s pulse driven by the
+# .1s refresh + wall-clock parity) while something is active, so it catches the
+# eye only when it should. Pulse is bright<->dim, not on<->off, so the item keeps
+# constant width and neighbouring menubar icons never shift.
+#   blinking yellow = a terminal needs you · blinking white = work in progress
+#   · steady green = serving · steady dim = idle.  Full detail is in the dropdown.
+DOT = "●"
+YELLOW, WHITE, GREEN, DIM = "#F2B705", "#FFFFFF", "#46A65A", "#555555"
+on = int(time.time()) % 2 == 0  # blink phase
+if any(is_waiting(s) for s in running):
+    print(f"{DOT} | color={YELLOW if on else DIM}")
+elif any(not s.get("service") for s in running):
+    print(f"{DOT} | color={WHITE if on else DIM}")
 elif running:
-    nonsvc = [s for s in running if not s.get("service")]
-    if nonsvc:
-        print(f"▶ {len(running)}")
-    else:
-        print(f"◉ {len(running)}")
+    print(f"{DOT} | color={GREEN}")
 else:
-    print("🕹")
+    print(f"{DOT} | color={DIM}")
 
 print("---")
 

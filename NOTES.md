@@ -27,7 +27,7 @@ gets you back to the right tab in under a second.
 - Viewers:
   - `~/Applications/Joystick.app` — SwiftUI (source: Joystick.swift, build:
     build-app.sh)
-  - `~/.config/swiftbar/joystick.5s.py` — SwiftBar menubar plugin
+  - `~/.config/swiftbar/joystick.1s.py` — SwiftBar menubar plugin
 - Click-to-focus: `joystick-focus.sh` — AppleScript, exact Ghostty surface id,
   cwd fallback.
 - Waiting detection:
