@@ -73,6 +73,27 @@ These were decided by using the tool; they define what it is.
 - Already-open terminal tabs from before a change still run the old emitter;
   only fresh tabs / `source ~/.zshrc` pick up edits.
 
+## Parallel sessions — work in a worktree by default
+
+Several Claude/agent sessions often run on this repo at once and will clobber
+each other otherwise (we've hit this repeatedly). **Default to working in a git
+worktree, not the main checkout, unless the user explicitly tells you to edit
+`main` directly.**
+
+- Ideal: be launched with `claude --worktree <feature>` so you start isolated.
+- If you're already on `main` and about to edit existing files, first:
+  `git worktree add ~/joystick-wt/<feature> -b <feature>`, then work there.
+- **Don't clobber the live app:** `build-app.sh` always writes to
+  `~/Applications/Joystick.app` and the event log is shared, so a worktree
+  build/run disturbs the running system. When testing from a worktree, build to
+  a throwaway app path, or coordinate with the user before rebuilding the live app.
+- **Scope your commits:** `git add <your specific files>`, never `git add -A` /
+  `git commit -am` — another session may have uncommitted work in the tree, and
+  a blanket add sweeps it into your commit. Check `git status` first.
+- When done: commit on your branch, merge to `main`, then `git worktree remove`.
+- Exception: purely **additive new files** can't collide — a worktree is
+  optional for those (but still fine).
+
 ## More
 
 `NOTES.md` holds the roadmap (v0.1 = shareable: single MenuBarExtra app,
