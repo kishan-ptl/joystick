@@ -823,25 +823,27 @@ func copyToPasteboard(_ s: String) {
 // matching elapsed-time on an in-flight Claude row. The warm hue sits near the
 // amber needs-you hand, but the sparkle shape + motion keep the two apart.
 extension Color {
+    init(hex: UInt) {
+        self.init(red: Double((hex >> 16) & 0xff) / 255,
+                  green: Double((hex >> 8) & 0xff) / 255,
+                  blue: Double(hex & 0xff) / 255)
+    }
+
     static let claudeOrange = Color(red: 217 / 255, green: 119 / 255, blue: 87 / 255)
 
-    // Claude's named session ("agent") colors → SwiftUI colors, for tinting the
-    // rename badge. Unknown/empty names return nil so the badge stays neutral.
+    // Claude Code's /color agent palette is the Dracula colors (extracted from the
+    // CLI binary) — NOT SwiftUI's stock .purple etc., which look noticeably off.
+    // These are the 8 names /color offers; unknown/empty → nil (neutral pill).
     static func claudeAgent(_ name: String) -> Color? {
         switch name.lowercased() {
-        case "red":             return .red
-        case "orange":          return .orange
-        case "yellow":          return .yellow
-        case "green":           return .green
-        case "mint":            return .mint
-        case "teal":            return .teal
-        case "cyan":            return .cyan
-        case "blue":            return .blue
-        case "indigo":          return .indigo
-        case "purple":          return .purple
-        case "pink", "magenta": return .pink
-        case "brown":           return .brown
-        case "gray", "grey":    return .gray
+        case "red":             return Color(hex: 0xff5858)
+        case "orange":          return Color(hex: 0xffb86c)
+        case "yellow":          return Color(hex: 0xf1fa8c)
+        case "green":           return Color(hex: 0x50fa7b)
+        case "cyan":            return Color(hex: 0x8be9fd)
+        case "blue":            return Color(hex: 0x61afef)
+        case "purple":          return Color(hex: 0xbd93f9)
+        case "pink", "magenta": return Color(hex: 0xff79c6)
         default:                return nil
         }
     }
