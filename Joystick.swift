@@ -1045,16 +1045,24 @@ struct GroupRow: View {
         // So: text is NOT selectable; the whole row is a plain click → focus,
         // and copy lives in the right-click menu (whole command / directory).
         VStack(alignment: .leading, spacing: 1) {
-            // Eyebrow above the label: ONLY your explicit rename (custom-title).
-            // The auto session topic stays as the row's label below, so a renamed
-            // session shows both (rename badge + topic); an unrenamed one shows
-            // just the topic and no badge. The agent color rides a small dot.
+            // Eyebrow above the prompt: your rename pill (if set) + Claude's
+            // auto-generated session topic, both shown. The prompt stays the
+            // label below. The pill is tinted by the session's agent color.
             let badgeName = group.current.sessionName
-            if !badgeName.isEmpty {
-                HStack(spacing: 0) {
-                    Spacer().frame(width: 43)   // align the name over the command text
-                    SessionEyebrow(name: badgeName,
-                                   tint: Color.claudeAgent(group.current.agentColor))
+            let topic = group.current.title
+            if !badgeName.isEmpty || !topic.isEmpty {
+                HStack(spacing: 6) {
+                    Spacer().frame(width: 43)   // align under the command text
+                    if !badgeName.isEmpty {
+                        SessionEyebrow(name: badgeName,
+                                       tint: Color.claudeAgent(group.current.agentColor))
+                    }
+                    if !topic.isEmpty {
+                        Text(topic)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                     Spacer(minLength: 0)
                 }
             }
