@@ -151,6 +151,10 @@ final class Store: ObservableObject {
     private var needsBackfill = false
 
     init() {
+        // Keep the installed emitter scripts current with this app build before
+        // anything else — an auto-update (Sparkle/brew) ships new bundled scripts
+        // but the hooks run the COPIES in $JOYSTICK_HOME.
+        Self.syncEmitters()
         if let d = UserDefaults.standard.dictionary(forKey: "seenAt") as? [String: Double] {
             seenAt = d
         }
@@ -174,6 +178,41 @@ final class Store: ObservableObject {
         backstopTimer?.invalidate()
         focusTick?.invalidate()
         if let o = focusObserver { NSWorkspace.shared.notificationCenter.removeObserver(o) }
+    }
+
+    // The shell + Claude hooks run COPIES of the emitter scripts in $JOYSTICK_HOME
+    // (placed there by install.sh), not the ones in our bundle. So an app update
+    // would otherwise leave them on stale logic until the user re-ran the
+    // installer. On launch, if $JOYSTICK_HOME exists (i.e. already installed) and
+    // its stamped version differs from ours, re-copy the bundled scripts and
+    // restamp. Fail-silent, and we never CREATE $JOYSTICK_HOME — first install
+    // (which also wires .zshrc/Claude) is install.sh's job, not ours.
+    nonisolated static func syncEmitters() {
+        let fm = FileManager.default
+        guard let resPath = Bundle.main.resourcePath else { return }
+        let homePath = ProcessInfo.processInfo.environment["JOYSTICK_HOME"]
+            ?? (NSHomeDirectory() + "/.config/joystick")
+        let home = URL(fileURLWithPath: (homePath as NSString).expandingTildeInPath)
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: home.path, isDirectory: &isDir), isDir.boolValue else { return }
+
+        let version = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? ""
+        let stamp = home.appendingPathComponent(".joystick-version")
+        let installed = (try? String(contentsOf: stamp, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !version.isEmpty, installed != version else { return }
+
+        // The same set install.sh places in $JOYSTICK_HOME (incl. the installer,
+        // so `install.sh uninstall` and re-runs use the current copy).
+        let res = URL(fileURLWithPath: resPath)
+        for s in ["install.sh", "joystick.zsh", "claude-hook.sh", "joystick-redact.zsh", "joystick-focus.sh"] {
+            let src = res.appendingPathComponent(s)
+            guard fm.fileExists(atPath: src.path) else { continue }
+            let dst = home.appendingPathComponent(s)
+            try? fm.removeItem(at: dst)
+            try? fm.copyItem(at: src, to: dst)
+        }
+        try? version.write(to: stamp, atomically: true, encoding: .utf8)
     }
 
     // Make the focused-tab highlight responsive without a perpetual poll. The
