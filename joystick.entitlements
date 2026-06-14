@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Entitlements for the notarized Developer ID build (see release.sh).
+     App Sandbox is intentionally OFF: Joystick inspects other processes
+     (ps/lsof) and drives Ghostty via Apple Events, which the sandbox blocks.
+     Under the hardened runtime, SENDING Apple Events to another app requires
+     this entitlement; the user-facing consent prompt comes from
+     NSAppleEventsUsageDescription in Joystick-Info.plist. -->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+</dict>
+</plist>
