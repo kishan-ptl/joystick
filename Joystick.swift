@@ -7,6 +7,7 @@ import SwiftUI
 import AppKit
 import Combine
 import Darwin
+import Carbon   // RegisterEventHotKey — global summon shortcut, no a11y prompt
 
 // MARK: - Events & operations
 
@@ -93,6 +94,9 @@ enum SetupResult: Equatable { case ok, failed(String) }
 final class Store: ObservableObject {
     @Published var activeGroups: [SurfaceGroup] = []
     @Published var idleGroups: [SurfaceGroup] = []
+    // Flat, first-seen-ordered list of ALL terminals (running + finished) for
+    // the keyboard-nav window. Stable slots — see slotOrder in reload().
+    @Published var orderedGroups: [SurfaceGroup] = []
     @Published var now = Date()
     @Published var commandsToday = 0   // shell + Claude turns started today (local time)
     // First-run onboarding state. shellWired/claudeWired reflect whether the zsh
@@ -116,6 +120,14 @@ final class Store: ObservableObject {
     // to-the-right-tab use case). Drives the focused-row highlight in GroupRow.
     @Published var focusedSurface: String? = nil
 
+    // Keyboard navigation (window only). filterText is the type-to-filter query;
+    // selectedKey is the group.key under the keyboard cursor. We anchor the
+    // cursor to the STABLE group identity, never an index — so as the live list
+    // re-sorts (a terminal flips to "waiting" and jumps to the top), the
+    // highlight follows the row you meant instead of the slot it used to be in.
+    @Published var filterText = ""
+    @Published var selectedKey: String? = nil
+
     static let minRunningSecs = 5.0
     static let minDoneSecs = 10.0
     static let doneWindowSecs = 6.0 * 3600
@@ -132,6 +144,9 @@ final class Store: ObservableObject {
     private var ttyStates: [String: TtyState] = [:]
     private var lastStallCheck = Date.distantPast
     private var notifiedWaiting: Set<String> = []
+    // First-seen order of group keys, preserved across reloads (new keys
+    // appended, vanished keys removed) — the stable slots for orderedGroups.
+    private var slotOrder: [String] = []
     // Parsed log cache — re-parse only when (mtime, size) move, and then read
     // only the bytes appended since lastReadOffset, folding each new event into
     // the maps below. A full re-read happens only on rotation/truncation.
@@ -176,6 +191,9 @@ final class Store: ObservableObject {
         if let d = UserDefaults.standard.dictionary(forKey: "seenAt") as? [String: Double] {
             seenAt = d
         }
+        // Restore the user's manual row order; reload() then drops gone keys and
+        // appends any new ones, so a saved order survives across launches.
+        slotOrder = UserDefaults.standard.stringArray(forKey: "slotOrder") ?? []
         commandsToday = UserDefaults.standard.integer(forKey: "commandsToday")
         tallyDayStart = UserDefaults.standard.double(forKey: "tallyDayStart")
         refreshWiring()
@@ -463,6 +481,22 @@ final class Store: ObservableObject {
         activeGroups = active.map(withMeta)
         idleGroups = idle.map(withMeta)
 
+        // Stable order for the keyboard-nav window: each terminal keeps its slot
+        // for life (state lives in the glyph, not the position); new terminals
+        // join at the TOP (newest first), closed ones drop out. We never reorder
+        // existing slots, so ↑/↓ cycling, ⌘1–9, and any drag-reordering stay put.
+        let present = Set(bySurface.keys)
+        let prevSlots = slotOrder
+        slotOrder.removeAll { !present.contains($0) }
+        let fresh = bySurface.keys.filter { !slotOrder.contains($0) }
+            .sorted { bySurface[$0]!.current.start > bySurface[$1]!.current.start }
+        slotOrder.insert(contentsOf: fresh, at: 0)
+        if slotOrder != prevSlots { persistSlotOrder() }
+        orderedGroups = slotOrder.compactMap { bySurface[$0] }.map(withMeta)
+
+        // Keep the keyboard cursor on a still-visible row as terminals come and go.
+        ensureSelection()
+
         let unseenCount = idle.filter { $0.current.unseen }.count
         NSApp.dockTile.badgeLabel = unseenCount > 0 ? "\(unseenCount)" : nil
 
@@ -544,6 +578,101 @@ final class Store: ObservableObject {
         p.executableURL = URL(fileURLWithPath: "/bin/zsh")
         p.arguments = [Self.focusScript, op.surface.isEmpty ? "-" : op.surface, op.cwd]
         try? p.run()
+    }
+
+    // MARK: - Keyboard navigation
+
+    // Does this group match the current type-to-filter query? (Empty query = all.)
+    func matchesFilter(_ g: SurfaceGroup) -> Bool {
+        guard !filterText.isEmpty else { return true }
+        let q = filterText.lowercased()
+        let c = g.current
+        return c.cmd.lowercased().contains(q)
+            || tilde(c.cwd).lowercased().contains(q)
+            || c.title.lowercased().contains(q)
+            || c.sessionName.lowercased().contains(q)
+    }
+    // The keyboard-nav list reads from the stable flat order, narrowed by the
+    // filter. Rendering and ↑/↓ navigation share this one list, so the cursor
+    // can't land on a row you can't see.
+    var visibleGroups: [SurfaceGroup] { orderedGroups.filter(matchesFilter) }
+
+    // Keep the cursor on a real, visible row. If the selected row vanished
+    // (closed, finished-aged-out, filtered away), fall back to the top visible
+    // row — which, given the sort, is the top "needs you" row when one exists,
+    // so summon → ⏎ does the obvious thing with zero arrow presses.
+    func ensureSelection() {
+        let keys = visibleGroups.map(\.key)
+        if selectedKey == nil || !keys.contains(selectedKey!) {
+            selectedKey = keys.first
+        }
+    }
+
+    // On summon, pre-aim the cursor: the first row that needs you (so ⌥⌘J → ⏎
+    // jumps straight to what's waiting), else the tab you're already in, else the
+    // top row. With a fixed order there's no "top = most urgent", so we go FIND
+    // the urgent one instead of assuming it floated up.
+    func selectForSummon() {
+        let order = visibleGroups
+        guard !order.isEmpty else { selectedKey = nil; return }
+        if let waiting = order.first(where: { $0.current.isWaiting }) {
+            selectedKey = waiting.key
+        } else if let f = focusedSurface, !f.isEmpty,
+                  let here = order.first(where: { $0.key == f || $0.current.surface == f }) {
+            selectedKey = here.key
+        } else {
+            selectedKey = order.first!.key
+        }
+    }
+
+    func moveSelection(_ delta: Int) {
+        let keys = visibleGroups.map(\.key)
+        guard !keys.isEmpty else { selectedKey = nil; return }
+        if let cur = selectedKey.flatMap({ keys.firstIndex(of: $0) }) {
+            selectedKey = keys[min(max(cur + delta, 0), keys.count - 1)]   // clamp, don't wrap
+        } else {
+            selectedKey = delta >= 0 ? keys.first : keys.last
+        }
+    }
+
+    private func selectedGroup() -> SurfaceGroup? {
+        selectedKey.flatMap { k in visibleGroups.first { $0.key == k } }
+    }
+
+    // ⏎ — focus the selected row's terminal. Returns false when nothing's
+    // selected, so the caller knows not to dismiss the window.
+    @discardableResult
+    func activateSelection() -> Bool {
+        guard let g = selectedGroup() else { return false }
+        focus(g.current)
+        return true
+    }
+
+    // ⌘1…⌘9 — jump straight to the Nth visible row and focus it.
+    @discardableResult
+    func jump(toIndex i: Int) -> Bool {
+        let order = visibleGroups
+        guard i >= 0, i < order.count else { return false }
+        selectedKey = order[i].key
+        focus(order[i].current)
+        return true
+    }
+
+    // Manual drag-to-reorder from the list. Reorders within the currently
+    // visible (filtered) rows, then splices back so any filtered-out rows keep
+    // their absolute slot. The new order sticks (reload() only ADDS new keys and
+    // drops gone ones — it never re-sorts) and is remembered across launches.
+    func moveSlots(fromOffsets source: IndexSet, toOffset destination: Int) {
+        let visibleKeys = visibleGroups.map(\.key)
+        var reordered = visibleKeys
+        reordered.move(fromOffsets: source, toOffset: destination)
+        let visibleSet = Set(visibleKeys)
+        var it = reordered.makeIterator()
+        slotOrder = slotOrder.map { visibleSet.contains($0) ? (it.next() ?? $0) : $0 }
+        persistSlotOrder()
+        // Reflect right away so the row doesn't snap back before the next reload.
+        let byKey = Dictionary(orderedGroups.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })
+        orderedGroups = slotOrder.compactMap { byKey[$0] }
     }
 
     // Locate joystick-focus.sh without assuming the dev's ~/joystick checkout:
@@ -848,6 +977,10 @@ final class Store: ObservableObject {
         UserDefaults.standard.set(seenAt, forKey: "seenAt")
     }
 
+    private func persistSlotOrder() {
+        UserDefaults.standard.set(slotOrder, forKey: "slotOrder")
+    }
+
     nonisolated static func fetchLiveSurfaceIds() -> Set<String>? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
@@ -1102,6 +1235,7 @@ struct GroupRow: View {
     let group: SurfaceGroup
     let nowTs: Double
     var focusedSurface: String? = nil
+    var isSelected: Bool = false   // under the keyboard cursor (window nav only)
     let action: () -> Void
 
     // Is this the Ghostty tab/split focused right now? Shell rows group BY
@@ -1167,13 +1301,25 @@ struct GroupRow: View {
         .onTapGesture { action() }
         .help("Click to focus this tab in Ghostty · right-click to copy")
         .contextMenu { copyMenu(for: group.current) }
-        // "You are here": tint the row for the surface focused in Ghostty right
-        // now. Neutral grey (the system's inactive-selection fill), like a
-        // dimmed Ghostty split — quiet on purpose, so it never competes with the
-        // colored ✋/▶/◉/✓/✗ state glyphs.
+        // The keyboard cursor: an accent bar down the leading edge, deliberately
+        // LOUDER and a different color than the quiet grey "you are here" below —
+        // so "the row I'm about to act on" never reads as "the tab I'm in".
+        .overlay(alignment: .leading) {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(Color.accentColor)
+                    .frame(width: 3)
+                    .padding(.vertical, 1)
+            }
+        }
+        // Backgrounds, in priority order: keyboard selection (accent) beats
+        // "you are here" (neutral grey, the system's inactive-selection fill)
+        // beats nothing. Grey stays quiet so it never competes with the colored
+        // ✋/▶/◉/✓/✗ state glyphs.
         .listRowBackground(
-            isFocused ? Color(nsColor: .unemphasizedSelectedContentBackgroundColor).opacity(0.5)
-                      : Color.clear
+            isSelected ? Color.accentColor.opacity(0.20)
+            : isFocused ? Color(nsColor: .unemphasizedSelectedContentBackgroundColor).opacity(0.5)
+            : Color.clear
         )
     }
 
@@ -1253,16 +1399,33 @@ struct SetupBanner: View {
 
 struct ContentView: View {
     @EnvironmentObject var store: Store
+    @Environment(\.openWindow) private var openWindow
     @State private var floatOnTop = true
+    @FocusState private var searchFocused: Bool
+    @State private var keyMonitor: Any?
+
+    // The windowed instance turns on keyboard-first navigation (filter field,
+    // arrow/Enter/Esc handling, the cursor highlight, hint footer). The menubar
+    // popover keeps the plain click-only behavior — arrow keys there fight the
+    // popover's own event handling, and you can't ⌘-Tab to a menubar dropdown.
+    var keyboardNav = false
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
+            if keyboardNav {
+                searchField
+                Divider()
+            }
             if store.showSetupBanner {
                 SetupBanner(store: store)
             }
             opList
+            if keyboardNav {
+                Divider()
+                hintFooter
+            }
         }
         .frame(minWidth: 400, minHeight: 320)
         .onAppear {
@@ -1272,10 +1435,53 @@ struct ContentView: View {
             // so without this the toggle would read "on" while windows stayed
             // at .normal until the first manual toggle.
             for w in NSApp.windows { w.level = floatOnTop ? .floating : .normal }
+            if keyboardNav {
+                Summoner.shared.reopen = { openWindow(id: "main") }
+                installKeyMonitor()
+                persistWindowFrame()
+                store.selectForSummon()
+                DispatchQueue.main.async { searchFocused = true }
+            }
         }
+        .onDisappear { if keyboardNav { removeKeyMonitor() } }
         .onChange(of: floatOnTop) { _, pinned in
             for w in NSApp.windows { w.level = pinned ? .floating : .normal }
         }
+        .onChange(of: store.filterText) { _, _ in
+            if keyboardNav { store.ensureSelection() }
+        }
+        // Hotkey summon: clear any stale filter and pre-select the top "needs
+        // you" row, then grab the field so you can type-to-filter immediately.
+        .onReceive(NotificationCenter.default.publisher(for: Summoner.didSummon)) { _ in
+            guard keyboardNav else { return }
+            store.filterText = ""
+            store.selectForSummon()
+            searchFocused = true
+        }
+    }
+
+    // Always-focused filter box (Raycast-style): plain typing narrows the list,
+    // while ↑/↓/⏎/esc/⌘-number are intercepted by the key monitor so they drive
+    // selection instead of editing the text.
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.caption).foregroundStyle(.secondary)
+            TextField("Filter terminals…", text: $store.filterText)
+                .textFieldStyle(.plain)
+                .focused($searchFocused)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+    }
+
+    private var hintFooter: some View {
+        Text("↑↓ move · ⏎ focus · ⌘1–9 jump · esc close · ⌥⌘J summon")
+            .font(.system(.caption2, design: .rounded))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
     }
 
     private var header: some View {
@@ -1309,27 +1515,114 @@ struct ContentView: View {
 
     private var opList: some View {
         let nowTs = store.now.timeIntervalSince1970
-        return List {
-            Section("Running") {
-                if store.activeGroups.isEmpty {
-                    Text("Nothing running")
-                        .font(.system(.body, design: .monospaced))
-                        .foregroundStyle(.secondary)
+        return ScrollViewReader { proxy in
+            List {
+                if keyboardNav {
+                    // One flat, fixed-order list: every terminal holds its slot,
+                    // state is the glyph not the position, nothing reshuffles.
+                    Section("Terminals") {
+                        if store.visibleGroups.isEmpty {
+                            Text(store.filterText.isEmpty ? "No terminals yet" : "No matches")
+                                .font(.system(.body, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(store.visibleGroups) { g in row(g, nowTs) }
+                                .onMove { src, dst in store.moveSlots(fromOffsets: src, toOffset: dst) }
+                        }
+                    }
                 } else {
-                    ForEach(store.activeGroups) { g in
-                        GroupRow(group: g, nowTs: nowTs, focusedSurface: store.focusedSurface) { store.focus(g.current) }
+                    // Menubar glance view keeps the prioritized Running / Finished
+                    // split (needs-you floats up) — it's click-only, not cycled.
+                    Section("Running") {
+                        if store.activeGroups.isEmpty {
+                            Text("Nothing running")
+                                .font(.system(.body, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(store.activeGroups) { g in row(g, nowTs) }
+                        }
+                    }
+                    if !store.idleGroups.isEmpty {
+                        Section("Finished") {
+                            ForEach(store.idleGroups) { g in row(g, nowTs) }
+                        }
                     }
                 }
             }
-            if !store.idleGroups.isEmpty {
-                Section("Finished") {
-                    ForEach(store.idleGroups) { g in
-                        GroupRow(group: g, nowTs: nowTs, focusedSurface: store.focusedSurface) { store.focus(g.current) }
-                    }
-                }
+            .listStyle(.inset)
+            // Keep the keyboard cursor on screen as it moves through a long list.
+            .onChange(of: store.selectedKey) { _, key in
+                guard keyboardNav, let key else { return }
+                withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(key, anchor: .center) }
             }
         }
-        .listStyle(.inset)
+    }
+
+    private func row(_ g: SurfaceGroup, _ nowTs: Double) -> some View {
+        GroupRow(group: g, nowTs: nowTs,
+                 focusedSurface: store.focusedSurface,
+                 isSelected: keyboardNav && g.key == store.selectedKey) {
+            store.selectedKey = g.key   // a mouse click also moves the cursor
+            store.focus(g.current)
+        }
+    }
+
+    // MARK: Keyboard monitor
+
+    // A local key-down monitor intercepts the navigation keys before the focused
+    // text field sees them, so one always-focused field can both filter (plain
+    // typing) and drive selection (arrows/enter/esc/⌘-number). Reliable where
+    // SwiftUI's .onKeyPress fights the field for arrow keys.
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        let store = self.store
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // Return a Bool (not the NSEvent) across the isolation hop, so we
+            // don't trip the NSEvent-isn't-Sendable check; map it to consume/pass.
+            let handled = MainActor.assumeIsolated { () -> Bool in
+                // Only steer the list while OUR window is key — the menubar
+                // popover and any sheets keep their own key handling.
+                guard let w = event.window, w.title == "Joystick", w.canBecomeMain else { return false }
+                let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                switch Int(event.keyCode) {
+                case 125: store.moveSelection(1); return true       // ↓
+                case 126: store.moveSelection(-1); return true      // ↑
+                case 36, 76:                                        // ⏎ / enter
+                    store.activateSelection()   // focus Ghostty; leave Joystick up
+                    return true
+                case 53:                                            // esc
+                    if store.filterText.isEmpty { Summoner.shared.dismiss() }
+                    else { store.filterText = "" }
+                    return true
+                default: break
+                }
+                if flags == .control, let ch = event.charactersIgnoringModifiers {
+                    if ch == "n" { store.moveSelection(1); return true }    // emacs-y
+                    if ch == "p" { store.moveSelection(-1); return true }
+                }
+                if flags == .command, let ch = event.charactersIgnoringModifiers,
+                   let n = Int(ch), (1...9).contains(n) {
+                    store.jump(toIndex: n - 1)   // focus Ghostty; leave Joystick up
+                    return true
+                }
+                return false   // everything else falls through to the filter field
+            }
+            return handled ? nil : event
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
+    }
+
+    // Remember the window's size/position across hides and relaunches. SwiftUI's
+    // own restoration doesn't reliably survive our manual show/hide, so pin it
+    // explicitly with an AppKit frame autosave.
+    private func persistWindowFrame() {
+        guard let w = NSApp.windows.first(where: { $0.title == "Joystick" && $0.canBecomeMain }) else { return }
+        let name = NSWindow.FrameAutosaveName("JoystickMain")
+        w.setFrameUsingName(name)
+        w.setFrameAutosaveName(name)
     }
 }
 
@@ -1356,13 +1649,99 @@ struct MenuBarLabel: View {
     }
 }
 
+// MARK: - Global hotkey & summon
+
+// One system-wide hotkey (⌥⌘J) that brings Joystick up from anywhere —
+// including from inside Ghostty — so triage never needs the mouse. Carbon's
+// RegisterEventHotKey is used deliberately: it works with NO Accessibility
+// permission prompt (unlike a CGEventTap), and is precise about the chord.
+final class HotKey {
+    private var ref: EventHotKeyRef?
+    private var handlerRef: EventHandlerRef?
+    private let onFire: () -> Void
+
+    init?(keyCode: UInt32, modifiers: UInt32, onFire: @escaping () -> Void) {
+        self.onFire = onFire
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                 eventKind: UInt32(kEventHotKeyPressed))
+        let installed = InstallEventHandler(GetApplicationEventTarget(), { _, _, userData in
+            guard let userData else { return noErr }
+            let me = Unmanaged<HotKey>.fromOpaque(userData).takeUnretainedValue()
+            DispatchQueue.main.async { me.onFire() }   // Carbon → main run loop
+            return noErr
+        }, 1, &spec, Unmanaged.passUnretained(self).toOpaque(), &handlerRef)
+        guard installed == noErr else { return nil }
+
+        let id = EventHotKeyID(signature: 0x4A4F5953 /* 'JOYS' */, id: 1)
+        guard RegisterEventHotKey(keyCode, modifiers, id,
+                                  GetApplicationEventTarget(), 0, &ref) == noErr else { return nil }
+    }
+
+    deinit {
+        if let ref { UnregisterEventHotKey(ref) }
+        if let handlerRef { RemoveEventHandler(handlerRef) }
+    }
+}
+
+// Bridges the global hotkey (AppKit/Carbon side) to the SwiftUI window: holds
+// the openWindow action so it can reopen a closed window, and posts a
+// notification the window listens for to grab the field + seed selection.
+final class Summoner {
+    static let shared = Summoner()
+    static let didSummon = Notification.Name("JoystickDidSummon")
+    var reopen: (() -> Void)?
+
+    private var mainWindow: NSWindow? {
+        NSApp.windows.first { $0.title == "Joystick" && $0.canBecomeMain }
+    }
+
+    // Toggle: if our window is already key & frontmost, tuck it away; otherwise
+    // bring it up, focused and ready for the keyboard.
+    func summon() {
+        if NSApp.isActive, mainWindow?.isKeyWindow == true {
+            NSApp.hide(nil)   // toggle off (Cmd-H — keeps the window and its size)
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.unhide(nil)
+        if let w = mainWindow {
+            w.makeKeyAndOrderFront(nil)
+        } else {
+            reopen?()   // window was fully closed — let SwiftUI build a fresh one
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            NotificationCenter.default.post(name: Self.didSummon, object: nil)
+        }
+    }
+
+    // After ⏎ / ⌘-number focuses a Ghostty tab, step aside so the (often pinned,
+    // floating) window doesn't sit on top of where we just jumped. We HIDE the
+    // app (Cmd-H) rather than close the window, so its size/position survive and
+    // the next summon brings the very same window back.
+    func dismiss() { NSApp.hide(nil) }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var hotKey: HotKey?
+
+    func applicationDidFinishLaunching(_ note: Notification) {
+        // ⌥⌘J — kVK_ANSI_J is 38.
+        hotKey = HotKey(keyCode: 38, modifiers: UInt32(cmdKey | optionKey)) {
+            Summoner.shared.summon()
+        }
+    }
+}
+
 @main
 struct JoystickApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store = Store()
 
     var body: some Scene {
-        WindowGroup("Joystick") {
-            ContentView().environmentObject(store)
+        // A single, UNIQUE window (not WindowGroup) — ⌥⌘J must never spawn a
+        // second copy; openWindow(id:) just refocuses this one.
+        Window("Joystick", id: "main") {
+            ContentView(keyboardNav: true).environmentObject(store)
         }
 
         // The app now owns the menubar itself (replacing the SwiftBar plugin).

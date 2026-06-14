@@ -50,6 +50,43 @@ gets you back to the right tab in under a second.
   surface focused while Ghostty is frontmost (sampled every 2s); seen-state
   persists in UserDefaults and is pruned with dead surfaces.
 
+## Keyboard-first window (2026-06-14)
+
+Ships the v0.2 "global hotkey + ⌘1–9 jump" item. The **window** (not the menubar
+popover) is now fully drivable without the mouse, Raycast-style:
+
+- **⌥⌘J** — global summon/toggle (Carbon `RegisterEventHotKey`; no Accessibility
+  prompt). Brings the window up focused from anywhere, incl. inside Ghostty;
+  press again to hide.
+- **↑/↓ (or ⌃n/⌃p)** move a keyboard cursor; **⏎** focuses that Ghostty surface;
+  **⌘1–9** jump to the Nth row; **type** to filter; **esc** clears filter / hides.
+- **⏎ leaves Joystick up** (does NOT hide) — it's a stay-open HUD; the Pin toggle
+  decides on-top vs. behind. esc / ⌥⌘J are the explicit dismiss.
+- **Fixed, first-seen, flat list** (no Running/Finished split in the window).
+  Each terminal keeps its slot for life — state shows in the glyph, not the
+  position — so ↑/↓ and ⌘1–9 are stable muscle memory. New terminals join at the
+  **TOP** (newest first); closed ones drop out. **Drag to reorder**; order
+  persists (UserDefaults `slotOrder`) and `reload()` never re-sorts, only
+  adds/drops. Cursor on summon **pre-selects** the first waiting row (then the
+  tab you're in, then top), so ⌥⌘J→⏎ still jumps to what needs you.
+- Single **`Window`** scene (not `WindowGroup`) so the hotkey can't spawn
+  duplicate windows; explicit frame autosave so size/position survive hide +
+  relaunch. Selection cursor = accent bar/tint, kept distinct from the quiet
+  grey "you are here" highlight.
+
+Decision (Kishan, 2026-06-14): the window trades the auto waiting-inbox SORT for
+a **stable order**, on purpose. The needs-you signal is still carried by the
+Dock/blue badges, the breathing-amber light, the header count, and summon
+pre-selection — and real users don't run enough sessions for a waiting row to get
+lost. The **menubar popover keeps** the prioritized Running/Finished sort (a
+glance surface, not cycled). Does not regress principle #1 (mirror, not inbox) —
+arguably reinforces it.
+
+Caveat to revisit before public/brew distribution: the `⌥⌘J` default collides
+with Chrome/Firefox's "JavaScript console" shortcut (a global hotkey wins
+system-wide). Fine personally; a **rebinding UI** (folds into the planned v0.2
+Settings) should land before shipping the cask.
+
 ## Roadmap
 
 ### v0.1 — shareable (1–2 weekends)
@@ -69,7 +106,8 @@ gets you back to the right tab in under a second.
 
 ### v0.2
 - [ ] Agent inbox: waiting items get their own section, sorted by blocked time
-- [ ] Global hotkey to summon window; ⌘1–9 jump to nth op
+- [x] Global hotkey to summon window; ⌘1–9 jump to nth op (2026-06-14) —
+      see "Keyboard-first window" below
 - [ ] bash (bash-preexec) + fish support
 - [ ] Settings UI: thresholds, ignore list, notification rules
 - [ ] Launch at login; Sparkle auto-updates

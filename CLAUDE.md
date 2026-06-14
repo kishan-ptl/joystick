@@ -23,8 +23,14 @@ shared state and doubles as the future integration API.
   title, model, mode, ctx). `chmod 600`.
 - **Viewer** — `Joystick.app` (SwiftUI), source `Joystick.swift`, built by
   `build-app.sh` → `~/Applications/Joystick.app`. Owns both the menubar
-  (`MenuBarExtra`) and the window. (A SwiftBar python plugin was the original
-  menubar; retired 2026-06-13 — recoverable from git history if ever needed.)
+  (`MenuBarExtra`) and the window. The window is **keyboard-first**: a global
+  hotkey (`⌥⌘J`, Carbon `RegisterEventHotKey`) summons/toggles it, and ↑↓ / ⏎ /
+  ⌘1–9 / type-to-filter drive a stable, first-seen, drag-reorderable flat list
+  (newest on top, slot order persisted) — while the menubar popover keeps the
+  prioritized waiting-on-top sort. The window's fixed order is deliberate, not a
+  regression of the sort; see NOTES.md "Keyboard-first window (2026-06-14)".
+  (A SwiftBar python plugin was the original menubar; retired 2026-06-13 —
+  recoverable from git history if ever needed.)
 - **Interaction** — `joystick-focus.sh` (AppleScript): click a row → focus that
   exact Ghostty surface (by id; cwd fallback; reopen if the tab is gone).
 
