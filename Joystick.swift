@@ -909,18 +909,18 @@ func shortModel(_ m: String) -> String {
 // without tinting the text, which keeps the name legible at any hue.
 struct SessionEyebrow: View {
     let name: String
-    let tint: Color?   // session's agent color, nil = no dot
+    let tint: Color?   // session's agent color; tints the pill (nil = neutral grey)
 
     var body: some View {
-        HStack(spacing: 4) {
-            if let tint {
-                Circle().fill(tint).frame(width: 6, height: 6)
-            }
-            Text(name)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
+        let c = tint ?? .secondary
+        Text(name)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(c)
+            .lineLimit(1)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(c.opacity(0.15), in: Capsule())
+            .overlay(Capsule().strokeBorder(c.opacity(0.35), lineWidth: 0.5))
     }
 }
 
