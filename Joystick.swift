@@ -84,6 +84,9 @@ struct SurfaceGroup: Identifiable {
 // Per-session metadata from the transcript (`meta` events), keyed by claude-<sid>.
 struct SessionMeta { var title = ""; var model = ""; var mode = ""; var ctx: Double = 0; var name = ""; var color = "" }
 
+// Outcome of running the in-app setup (install.sh).
+enum SetupResult: Equatable { case ok, failed(String) }
+
 // MARK: - Store
 
 @MainActor
@@ -92,6 +95,21 @@ final class Store: ObservableObject {
     @Published var idleGroups: [SurfaceGroup] = []
     @Published var now = Date()
     @Published var commandsToday = 0   // shell + Claude turns started today (local time)
+    // First-run onboarding state. shellWired/claudeWired reflect whether the zsh
+    // hook and Claude hooks are actually present; the banner uses them to offer
+    // one-click setup (running the bundled install.sh) instead of manual steps.
+    @Published var shellWired = false
+    @Published var claudeWired = false
+    @Published var isSettingUp = false
+    @Published var setupResult: SetupResult? = nil
+    var needsSetup: Bool { !shellWired || !claudeWired }
+    // Show the onboarding banner while unwired, and briefly after a successful
+    // run (to show the "open a new terminal" nudge until dismissed).
+    var showSetupBanner: Bool {
+        if needsSetup { return true }
+        if case .ok = setupResult { return true }
+        return false
+    }
     // Surface id of the Ghostty tab/split focused right now (or most recently,
     // while you're away in another app — we deliberately DON'T clear it on blur,
     // so the highlight keeps pointing at "where you were" — that's the get-back-
@@ -160,6 +178,7 @@ final class Store: ObservableObject {
         }
         commandsToday = UserDefaults.standard.integer(forKey: "commandsToday")
         tallyDayStart = UserDefaults.standard.double(forKey: "tallyDayStart")
+        refreshWiring()
         reload()
         // Watch the log instead of polling it: near-instant pickup of new
         // sessions and state changes, and ~zero wakeups while the log is quiet.
@@ -213,6 +232,66 @@ final class Store: ObservableObject {
             try? fm.copyItem(at: src, to: dst)
         }
         try? version.write(to: stamp, atomically: true, encoding: .utf8)
+    }
+
+    // Are the shell + Claude hooks actually wired? We look for the marker
+    // substrings rather than the exact install.sh block, so a hand-wired or
+    // dev-repo setup (sourcing from ~/joystick) reads as installed too. Honors
+    // the same env overrides install.sh uses, which keeps it testable.
+    func refreshWiring() {
+        let env = ProcessInfo.processInfo.environment
+        func read(_ p: String) -> String {
+            (try? String(contentsOfFile: (p as NSString).expandingTildeInPath, encoding: .utf8)) ?? ""
+        }
+        let zshrc = env["JOYSTICK_ZSHRC"] ?? ((env["ZDOTDIR"] ?? NSHomeDirectory()) + "/.zshrc")
+        let claude = env["JOYSTICK_CLAUDE_SETTINGS"] ?? (NSHomeDirectory() + "/.claude/settings.json")
+        shellWired = read(zshrc).contains("joystick.zsh")
+        claudeWired = read(claude).contains("claude-hook.sh")
+    }
+
+    // One-click first-run setup: run the bundled install.sh, which wires the zsh
+    // hook + Claude hooks (idempotent, backs up every file it edits). Finder-
+    // launched apps inherit a minimal PATH, so prepend Homebrew's bins — install.sh
+    // needs `jq`, which is often brew-only. Re-checks wiring when done.
+    func runSetup() {
+        guard let res = Bundle.main.resourcePath else { setupResult = .failed("App resources missing"); return }
+        let installer = res + "/install.sh"
+        guard FileManager.default.fileExists(atPath: installer) else {
+            setupResult = .failed("Installer missing from app bundle"); return
+        }
+        isSettingUp = true
+        setupResult = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            p.arguments = [installer]
+            var env = ProcessInfo.processInfo.environment
+            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")
+            p.environment = env
+            let pipe = Pipe()
+            p.standardOutput = pipe
+            p.standardError = pipe
+            var output = "", code: Int32 = -1
+            do {
+                try p.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()   // drain before wait (no deadlock)
+                p.waitUntilExit()
+                output = String(data: data, encoding: .utf8) ?? ""
+                code = p.terminationStatus
+            } catch {
+                output = error.localizedDescription
+            }
+            DispatchQueue.main.async {
+                self.isSettingUp = false
+                self.refreshWiring()
+                if code == 0 && !self.needsSetup {
+                    self.setupResult = .ok
+                } else {
+                    let last = output.split(whereSeparator: \.isNewline).last.map(String.init)
+                    self.setupResult = .failed(last ?? "Setup failed — check that jq is installed")
+                }
+            }
+        }
     }
 
     // Make the focused-tab highlight responsive without a perpetual poll. The
@@ -1115,31 +1194,79 @@ struct GroupRow: View {
     }
 }
 
+// First-run onboarding: auto-appears when the hooks aren't wired. One button
+// runs the bundled install.sh (idempotent, backs up every file it edits) — no
+// terminal, no pasting. Shows per-item status, surfaces errors, and nudges
+// "open a new terminal" on success (the zsh hook only takes effect in new shells).
+struct SetupBanner: View {
+    @ObservedObject var store: Store
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if store.isSettingUp {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Setting up…").font(.callout)
+                }
+            } else if store.needsSetup {
+                Text("Connect Joystick").font(.headline)
+                Text("Wire the shell and Claude Code hooks so your terminals show up here. Idempotent, and every file it edits is backed up first.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                statusRow("Shell integration (zsh)", store.shellWired)
+                statusRow("Claude Code hooks", store.claudeWired)
+                if case .failed(let msg) = store.setupResult {
+                    Text(msg).font(.caption).foregroundStyle(.red).lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Button { store.runSetup() } label: {
+                    Text(store.setupResult == nil ? "Enable" : "Try again")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+            } else {   // wired — success nudge until dismissed
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    Text("Connected — open a new terminal to start tracking.").font(.callout)
+                    Spacer(minLength: 8)
+                    Button("Done") { store.setupResult = nil }.controlSize(.small)
+                }
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.secondary.opacity(0.12)))
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+    }
+
+    @ViewBuilder
+    private func statusRow(_ label: String, _ ok: Bool) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: ok ? "checkmark.circle.fill" : "circle.dashed")
+                .foregroundStyle(ok ? Color.green : Color.secondary)
+            Text(label).font(.callout)
+            Spacer()
+        }
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var store: Store
     @State private var floatOnTop = true
-    @State private var copiedPrompt = false
-
-    // First-run onboarding without a wizard: the user pastes this into Claude
-    // Code, which runs the bundled installer (shell + Claude hooks). Claude
-    // adapts to their environment and explains the diffs — the onboarding UI we
-    // don't have to build. install.sh ships in the app bundle's Resources.
-    static var onboardingPrompt: String {
-        let installer = Bundle.main.resourcePath.map { $0 + "/install.sh" } ?? "~/joystick/install.sh"
-        return "Set up Joystick on this Mac: run the installer at \"\(installer)\" — "
-            + "it wires up the zsh shell hook and Claude Code hooks, is idempotent, and "
-            + "backs up every file it edits. Then tell me in one line what it changed and "
-            + "how to undo it."
-    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
+            if store.showSetupBanner {
+                SetupBanner(store: store)
+            }
             opList
         }
         .frame(minWidth: 400, minHeight: 320)
         .onAppear {
+            store.refreshWiring()
             store.reload()
             // Apply the default pin state — onChange only fires on a *change*,
             // so without this the toggle would read "on" while windows stayed
@@ -1171,17 +1298,6 @@ struct ContentView: View {
                 .font(.system(.caption, design: .rounded))
                 .foregroundStyle(.secondary)
                 .help("Shell commands + Claude turns started today")
-            Button {
-                copyToPasteboard(Self.onboardingPrompt)
-                copiedPrompt = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copiedPrompt = false }
-            } label: {
-                Label(copiedPrompt ? "Copied — paste into Claude" : "Set up",
-                      systemImage: copiedPrompt ? "checkmark" : "wand.and.stars")
-            }
-            .buttonStyle(.borderless)
-            .controlSize(.small)
-            .help("Copy a prompt that installs Joystick's shell + Claude hooks — paste it into Claude Code")
             Toggle("Pin", isOn: $floatOnTop)
                 .toggleStyle(.switch)
                 .controlSize(.mini)
