@@ -284,8 +284,12 @@ annoyances are the real v0.2.
 ## Known issues / debt
 - Stall heuristic false-positives on silent network waits (rsync -q, hung ssh)
   — arguably still useful info; label it "waiting for input?" with the ?
-- Interrupted Claude turns (Esc) may leave a dangling running row until the
-  next prompt overwrites it (Stop hook doesn't fire on interrupt)
+- Interrupted Claude turns (Esc) leave a dangling running row until the next
+  prompt (Stop hook doesn't fire on interrupt). Since the queued-prompt-race fix,
+  that next prompt now closes the dangling turn into history instead of dropping
+  it — but as a ✓ with a synthetic duration (no real exit/blurb), so an
+  interrupted turn reads as a short success. Acceptable for now; an "ended,
+  outcome unknown" glyph would be the real fix.
 - Ad-hoc codesigning → TCC automation re-prompts after each rebuild (fixed by
   real Developer ID signing in v0.1)
 - 1s timer polling (mtime-gated since 2026-06-12 review, so cheap) — FSEvents
