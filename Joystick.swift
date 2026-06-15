@@ -1082,14 +1082,16 @@ struct ClaudeThinkingIcon: View {
     }
 }
 
-// A row that needs you, shown as a soft yellow light that gently breathes —
-// opacity (and a faint glow) eased in and out on a sine, calm rather than an
-// attention-grabbing on/off blink. TimelineView drives the redraw, so it pauses
-// when the row is off-screen and survives row reloads with no manual Timer/@State
-// to leak or reset — same approach as ClaudeThinkingIcon.
+// A row that needs you, shown as a soft golden light that gently breathes —
+// opacity eased in and out on a sine, calm rather than an attention-grabbing
+// on/off blink. No glow/halo: the light stays contained within the circle's
+// perimeter. TimelineView drives the redraw, so it pauses when the row is
+// off-screen and survives row reloads with no manual Timer/@State to leak or
+// reset — same approach as ClaudeThinkingIcon.
 struct WaitingLight: View {
     private static let period = 2.0          // seconds per full breath
     private static let fps = 24.0
+    private static let gold = Color(hex: 0xFFC107)   // warm golden, not lemon-yellow
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1.0 / Self.fps)) { context in
@@ -1097,10 +1099,9 @@ struct WaitingLight: View {
             let phase = (sin(t / Self.period * 2 * Double.pi) + 1) / 2   // 0…1, smooth
             let level = 0.3 + 0.7 * phase                                // 0.3…1.0
             Image(systemName: "circle.fill")
-                .font(.system(size: 13))
-                .foregroundStyle(.yellow)
+                .font(.system(size: 9))
+                .foregroundStyle(Self.gold)
                 .opacity(level)
-                .shadow(color: .yellow.opacity(level * 0.7), radius: 3)   // breathing halo
                 .frame(width: 16, height: 16)   // fixed box so it lines up with the other glyphs
         }
     }
@@ -1195,7 +1196,7 @@ struct OpRow: View {
                 Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
             }
         }
-        .font(.system(size: 16))
+        .font(.system(size: 11))
     }
 
     private var subtitle: String {
@@ -1610,11 +1611,17 @@ struct ContentView: View {
 
     // Remember the window's size/position across hides and relaunches. SwiftUI's
     // own restoration doesn't reliably survive our manual show/hide, so pin it
-    // explicitly with an AppKit frame autosave.
+    // explicitly with an AppKit frame autosave. On first run (nothing saved yet)
+    // seed the frame we settled on: 400×686, anchored to the top-right of the
+    // screen — the menubar-companion shape, out of the way of editor windows.
     private func persistWindowFrame() {
         guard let w = NSApp.windows.first(where: { $0.title == "Joystick" && $0.canBecomeMain }) else { return }
         let name = NSWindow.FrameAutosaveName("JoystickMain")
-        w.setFrameUsingName(name)
+        if !w.setFrameUsingName(name), let vf = (w.screen ?? NSScreen.main)?.visibleFrame {
+            let size = NSSize(width: 400, height: min(686, vf.height))
+            let origin = NSPoint(x: vf.maxX - size.width, y: vf.maxY - size.height)
+            w.setFrame(NSRect(origin: origin, size: size), display: true)
+        }
         w.setFrameAutosaveName(name)
     }
 }
@@ -1736,6 +1743,7 @@ struct JoystickApp: App {
         Window("Joystick", id: "main") {
             ContentView(keyboardNav: true).environmentObject(store)
         }
+        .defaultSize(width: 400, height: 686)
 
         // The app now owns the menubar itself (replacing the SwiftBar plugin).
         MenuBarExtra {
