@@ -1143,6 +1143,8 @@ struct SessionEyebrow: View {
 struct OpRow: View {
     let op: Op
     let nowTs: Double
+    var jumpNumber: Int? = nil      // ⌘N jump hint (window nav only); nil = none
+    var showJumpSlot = false        // reserve the trailing slot so the time column stays aligned
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -1176,8 +1178,28 @@ struct OpRow: View {
                 .foregroundStyle(op.isService ? Color.green
                                  : (op.isRunning && op.isClaude && !op.isWaiting) ? Color.claudeOrange
                                  : op.isRunning ? Color.accentColor : .secondary)
+            if showJumpSlot { jumpBadge }
         }
         .padding(.vertical, 3)
+    }
+
+    // ⌘1–9 jump affordance: a quiet keycap at the row's trailing edge so the
+    // shortcut is discoverable. Only the first 9 rows get a number; the rest
+    // reserve the same width so the time column stays aligned.
+    @ViewBuilder
+    private var jumpBadge: some View {
+        if let n = jumpNumber {
+            Text("⌘\(n)")
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                .overlay(Capsule().strokeBorder(Color.secondary.opacity(0.22), lineWidth: 0.5))
+                .frame(width: 30, alignment: .trailing)
+        } else {
+            Color.clear.frame(width: 30)
+        }
     }
 
     private var statusIcon: some View {
@@ -1238,6 +1260,8 @@ struct GroupRow: View {
     let nowTs: Double
     var focusedSurface: String? = nil
     var isSelected: Bool = false   // under the keyboard cursor (window nav only)
+    var keyboardNav: Bool = false  // window list — shows the ⌘N jump hint
+    var jumpNumber: Int? = nil     // this row's ⌘N number (1–9), if in range
     let action: () -> Void
 
     // Is this the Ghostty tab/split focused right now? Shell rows group BY
@@ -1281,7 +1305,8 @@ struct GroupRow: View {
                     Spacer(minLength: 0)
                 }
             }
-            OpRow(op: group.current, nowTs: nowTs)
+            OpRow(op: group.current, nowTs: nowTs,
+                  jumpNumber: jumpNumber, showJumpSlot: keyboardNav)
             ForEach(group.history) { op in
                 HStack(spacing: 0) {
                     Spacer().frame(width: 43)  // align under the command text
@@ -1520,8 +1545,10 @@ struct ContentView: View {
                                 .font(.system(.body, design: .monospaced))
                                 .foregroundStyle(.secondary)
                         } else {
-                            ForEach(store.visibleGroups) { g in row(g, nowTs) }
-                                .onMove { src, dst in store.moveSlots(fromOffsets: src, toOffset: dst) }
+                            ForEach(Array(store.visibleGroups.enumerated()), id: \.element.id) { idx, g in
+                                row(g, nowTs, index: idx)
+                            }
+                            .onMove { src, dst in store.moveSlots(fromOffsets: src, toOffset: dst) }
                         }
                     }
                 } else {
@@ -1552,10 +1579,12 @@ struct ContentView: View {
         }
     }
 
-    private func row(_ g: SurfaceGroup, _ nowTs: Double) -> some View {
+    private func row(_ g: SurfaceGroup, _ nowTs: Double, index: Int = 0) -> some View {
         GroupRow(group: g, nowTs: nowTs,
                  focusedSurface: store.focusedSurface,
-                 isSelected: keyboardNav && g.key == store.selectedKey) {
+                 isSelected: keyboardNav && g.key == store.selectedKey,
+                 keyboardNav: keyboardNav,
+                 jumpNumber: (keyboardNav && index < 9) ? index + 1 : nil) {
             store.selectedKey = g.key   // a mouse click also moves the cursor
             store.focus(g.current)
         }
