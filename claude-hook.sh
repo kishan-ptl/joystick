@@ -161,7 +161,7 @@ case $event in
     fi
     # The 120-char prompt cap keeps the line < PIPE_BUF (4096) so concurrent
     # appends from other shells/hooks stay atomic — don't raise it materially.
-    jq -cn --arg id "$id" --arg cmd "✦ ${prompt[1,120]}" --arg cwd "$cwd" \
+    jq -cn --arg id "$id" --arg cmd "❯ ${prompt[1,120]}" --arg cwd "$cwd" \
       --arg surface "$surface" --argjson pid "$cpid" --argjson ts "$now" \
       '{v:1,kind:"claude",ev:"start",id:$id,cmd:$cmd,cwd:$cwd,pid:$pid,tty:"",surface:$surface,ts:$ts}' >> "$LOG"
     # Refresh session meta at turn START too (backgrounded, so no turn-start

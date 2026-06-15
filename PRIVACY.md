@@ -17,7 +17,7 @@ One JSON object per line, two events per operation (`start` and `end`):
 
 | Field | Example | Notes |
 |---|---|---|
-| `cmd` | `git push origin main` | the command (or `✦ <prompt>` for a Claude turn) — **sanitized**, see below |
+| `cmd` | `git push origin main` | the command (or `❯ <prompt>` for a Claude turn) — **sanitized**, see below |
 | `cwd` | `/Users/you/project` | working directory |
 | `pid`, `tty`, `surface` | | process id, terminal device, Ghostty surface id |
 | `ts`, `dur`, `exit` | | timestamps, duration, exit code |
