@@ -94,38 +94,6 @@ enum SetupResult: Equatable { case ok, failed(String) }
 // means the user said no (or it's off in Privacy settings) — we surface a banner.
 enum AutomationStatus { case granted, denied, notDetermined, unknown }
 
-// The time window for the header turn-count, selectable from the count menu.
-// Days are 4am-aligned (see Store.fourAMDayStart) so a "day" tracks when you
-// actually work, not the midnight clock — a 2am session still counts as
-// yesterday. `days` is how many such days the window spans.
-enum TallyRange: String, CaseIterable {
-    case d1, d3, d7, m1
-    var days: Int {
-        switch self {
-        case .d1: return 1
-        case .d3: return 3
-        case .d7: return 7
-        case .m1: return 30
-        }
-    }
-    var label: String {   // compact tag shown next to the count
-        switch self {
-        case .d1: return "1d"
-        case .d3: return "3d"
-        case .d7: return "7d"
-        case .m1: return "1mo"
-        }
-    }
-    var menuLabel: String {   // longer label in the dropdown
-        switch self {
-        case .d1: return "Today (1d)"
-        case .d3: return "Last 3 days"
-        case .d7: return "Last 7 days"
-        case .m1: return "Last month"
-        }
-    }
-}
-
 // MARK: - Store
 
 @MainActor
@@ -136,8 +104,7 @@ final class Store: ObservableObject {
     // the keyboard-nav window. Stable slots — see slotOrder in reload().
     @Published var orderedGroups: [SurfaceGroup] = []
     @Published var now = Date()
-    @Published var commandsToday = 0   // shell + Claude turns started in the selected window
-    @Published var tallyRange: TallyRange = .d1   // which window the count covers (persisted)
+    @Published var commandsToday = 0   // shell + Claude turns started today (4am-aligned, local)
     // First-run onboarding state. shellWired/claudeWired reflect whether the zsh
     // hook and Claude hooks are actually present; the banner uses them to offer
     // one-click setup (running the bundled install.sh) instead of manual steps.
@@ -217,11 +184,10 @@ final class Store: ObservableObject {
     // the log-watch model's quiet.
     private var focusTick: Timer?
     private var focusObserver: NSObjectProtocol?
-    // Windowed turn tally (shell + Claude turns started since the window start).
-    // Driven incrementally as starts are folded; recomputed from the log on a
-    // window-boundary roll or a range change (backfill), and persisted so it
-    // survives restarts and log rotation. tallyDayStart is the window's start
-    // instant — a 4am-aligned day boundary, possibly several days back.
+    // Today's turn tally (shell + Claude turns since the 4am day boundary).
+    // Driven incrementally as starts are folded; recomputed from the log on the
+    // 4am roll (backfill), and persisted so it survives restarts and log
+    // rotation. tallyDayStart is that 4am-aligned day-start instant.
     private var tallyDayStart: TimeInterval = 0
     private var needsBackfill = false
 
@@ -238,8 +204,6 @@ final class Store: ObservableObject {
         slotOrder = UserDefaults.standard.stringArray(forKey: "slotOrder") ?? []
         commandsToday = UserDefaults.standard.integer(forKey: "commandsToday")
         tallyDayStart = UserDefaults.standard.double(forKey: "tallyDayStart")
-        if let raw = UserDefaults.standard.string(forKey: "tallyRange"),
-           let r = TallyRange(rawValue: raw) { tallyRange = r }
         refreshWiring()
         refreshAutomation()
         reload()
@@ -836,32 +800,20 @@ final class Store: ObservableObject {
         return start.timeIntervalSince1970
     }
 
-    // Start of the currently-selected count window: the 4am boundary of today,
-    // minus (range − 1) whole days, so "3d" spans today plus the two prior days.
-    private func windowStart(for date: Date) -> TimeInterval {
-        fourAMDayStart(date) - Double(tallyRange.days - 1) * 86_400
-    }
-
-    // If the window start has moved since the tally was last anchored — a 4am
-    // roll, or a range change — reset it and force a cold re-read so the new
-    // window's count is backfilled from the log.
+    // If the 4am day boundary has moved since the tally was last anchored, reset
+    // and force a cold re-read so the new day's count is backfilled from the log.
+    // Clearing parsedOpen/parsedDone would otherwise blank every row until the
+    // next log event, because parseLogIfChanged's mtime/size gate skips an
+    // unchanged file — so we also invalidate that cache to guarantee the re-read.
     private func rolloverTallyIfNeeded() {
-        let start = windowStart(for: now)
-        guard start != tallyDayStart else { return }
-        tallyDayStart = start
+        let dayStart = fourAMDayStart(now)
+        guard dayStart != tallyDayStart else { return }
+        tallyDayStart = dayStart
         commandsToday = 0
         needsBackfill = true
         lastReadOffset = 0; parsedOpen = [:]; parsedDone = []; parsedMeta = [:]
+        lastLogMtime = .distantPast; lastLogSize = .max   // force parseLogIfChanged to re-read
         persistTally()
-    }
-
-    // Switch the count window. reload() → rolloverTallyIfNeeded sees the new
-    // window start and backfills the count from the log.
-    func setTallyRange(_ r: TallyRange) {
-        guard r != tallyRange else { return }
-        tallyRange = r
-        UserDefaults.standard.set(r.rawValue, forKey: "tallyRange")
-        reload()
     }
 
     // Shell commands + Claude turns count toward the daily tally; external
@@ -1739,25 +1691,10 @@ struct ContentView: View {
             Text(parts.isEmpty ? "Idle" : parts.joined(separator: " · "))
                 .font(.system(.subheadline).weight(.semibold))
             Spacer()
-            Menu {
-                Picker("Window", selection: Binding(
-                    get: { store.tallyRange },
-                    set: { store.setTallyRange($0) }
-                )) {
-                    ForEach(TallyRange.allCases, id: \.self) { r in
-                        Text(r.menuLabel).tag(r)
-                    }
-                }
-                .pickerStyle(.inline)
-            } label: {
-                Text("❯ \(store.commandsToday) turns · \(store.tallyRange.label)")
-                    .font(.system(.caption))
-                    .foregroundStyle(.secondary)
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Shell commands + Claude turns in the selected window (days start at 4am)")
+            Text("❯ \(store.commandsToday) turns")
+                .font(.system(.caption))
+                .foregroundStyle(.secondary)
+                .help("Shell commands + Claude turns today (the day starts at 4am)")
             Toggle("Pin", isOn: $floatOnTop)
                 .toggleStyle(.switch)
                 .controlSize(.mini)
