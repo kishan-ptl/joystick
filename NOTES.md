@@ -249,6 +249,26 @@ Terminal taxonomy: idle / running an op / hosting a service / interactive app
 Process note: use it for a week, keep an annoyances list below — the top 3
 annoyances are the real v0.2.
 
+## Considered & declined
+
+- **Type-and-send terminal input from Joystick (2026-06-14)** — stay focused on
+  the board, arrow through rows, compose and send your next input to the selected
+  terminal/Claude session without switching. Mechanically feasible: Ghostty's
+  AppleScript `perform action "text:…"` injects into a surface by id (no focus
+  bounce, only Automation perms we already hold; not the Accessibility/keystroke
+  hack). **Declined** anyway: the teleport (⌥⌘J → tab) is already <1s and IS the
+  product, so input shaves an already-cheap step rather than filling a gap. Most
+  terminal interaction is read-*then*-respond — answering blind is where you
+  approve the wrong thing — so a composer only helps the proactive fire-and-forget
+  case (queue Claude's next instruction), and even that is marginal outside heavy
+  multi-agent triage. Bigger cost: it flips Joystick from observe-only mirror
+  (principle #1) into an actor, denting the can't-hurt-you safety that makes the
+  log trustworthy. **Reopen only if** the workflow becomes orchestration-console
+  (dispatch a fleet of parallel agents from one surface); then build just the
+  narrow Claude "queue next message" composer and degrade everything structured
+  (permission prompts, shell input, passwords) to "⏎ jumps to the tab." Don't
+  chase those — that's how it becomes a bad terminal emulator.
+
 ## Annoyances (add as encountered)
 
 -
