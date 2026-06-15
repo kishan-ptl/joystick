@@ -26,6 +26,8 @@ struct RawEvent: Decodable {
     let dur: Double?
     let msg: String?
     let act: String?       // current activity (tool the agent just used), on `active` events
+    let sub: String?       // subagent key (Task tool_use_id), on `active` events that track a live Task
+    let subdone: Bool?     // true on the `active` event that ENDS a tracked subagent
     let title: String?     // session topic (ai-title), on `meta` events
     let model: String?     // model id, on `meta` events
     let mode: String?      // permission mode, on `meta` events
@@ -34,6 +36,11 @@ struct RawEvent: Decodable {
     let color: String?     // user-set session color (agent color), on `meta` events
     let wt: String?        // git worktree leaf the session runs in (linked worktrees only), on `meta` events
 }
+
+// A subagent (Task) running inside a Claude turn. Keyed by the Task's tool_use_id
+// so its start (PreToolUse) and finish (PostToolUse) line up — concurrent
+// subagents each get their own live line instead of fighting over one activity.
+struct LiveChild: Identifiable { let id: String; let label: String }
 
 struct Op: Identifiable {
     let key: String
@@ -50,6 +57,7 @@ struct Op: Identifiable {
     var waitingSince: Double? = nil   // explicit waiting event (Claude hooks)
     var waitingMsg: String? = nil
     var activity: String? = nil       // live: tool the agent is currently using (Claude)
+    var liveSubagents: [LiveChild] = []  // live: subagents (Task) running this turn, in start order
     var stallIdle: Double? = nil      // heuristic: tty quiet + fg proc asleep
     var isService = false             // fg process group holds a listening port
     var unseen = false                // finished, and surface not viewed since
@@ -894,7 +902,17 @@ final class Store: ObservableObject {
             if var op = parsedOpen[e.id] {
                 op.waitingSince = nil
                 op.waitingMsg = nil
-                op.activity = e.act        // live "what it's doing now"
+                if let sub = e.sub, !sub.isEmpty {
+                    // A tracked subagent (Task): add on start, drop on finish, so
+                    // concurrent subagents each get their own live line under the
+                    // session row instead of overwriting one latest-wins activity.
+                    op.liveSubagents.removeAll { $0.id == sub }
+                    if e.subdone != true {
+                        op.liveSubagents.append(LiveChild(id: sub, label: e.act ?? "Task"))
+                    }
+                } else {
+                    op.activity = e.act    // live "what it's doing now" (non-Task tools)
+                }
                 parsedOpen[e.id] = op
             }
         case "meta":
@@ -1349,6 +1367,10 @@ struct OpRow: View {
             parts.append("✋ \(what) — \(fmt(nowTs - since))")
         } else if let idle = op.stallIdle {
             parts.append("✋ waiting for input? quiet \(fmt(idle))")
+        } else if op.isRunning, op.liveSubagents.count == 1 {
+            parts.append("⚙ \(op.liveSubagents[0].label)")          // a lone subagent reads inline, as before
+        } else if op.isRunning, op.liveSubagents.count >= 2 {
+            parts.append("⚙ \(op.liveSubagents.count) agents running")  // fan-out: count here, list below
         } else if op.isRunning, let act = op.activity, !act.isEmpty {
             parts.append("⚙ \(act)")       // live agent activity (PostToolUse)
         } else if op.isService {
@@ -1471,6 +1493,32 @@ struct GroupRow: View {
             }
             OpRow(op: group.current, nowTs: nowTs,
                   jumpNumber: jumpNumber, showJumpSlot: keyboardNav)
+            // Live subagent fan-out: when a turn runs 2+ Tasks at once, list each
+            // beneath the row (the main line shows the count). ≤3 shown, like the
+            // history below; the rest fold into "+N more" so the row stays bounded.
+            if group.current.isRunning, group.current.liveSubagents.count >= 2 {
+                let kids = group.current.liveSubagents
+                ForEach(kids.prefix(3)) { kid in
+                    HStack(spacing: 0) {
+                        Spacer().frame(width: 43)  // align under the command text
+                        Text("⚙ \(kid.label)")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                }
+                if kids.count > 3 {
+                    HStack(spacing: 0) {
+                        Spacer().frame(width: 43)
+                        Text("+\(kids.count - 3) more")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .opacity(0.55)
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
             ForEach(group.history) { op in
                 HStack(spacing: 0) {
                     Spacer().frame(width: 43)  // align under the command text
