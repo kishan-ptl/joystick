@@ -1706,7 +1706,13 @@ struct ContentView: View {
                                 .font(.body)
                                 .foregroundStyle(.secondary)
                         } else {
-                            ForEach(Array(store.visibleGroups.enumerated()), id: \.element.id) { idx, g in
+                            // Iterate visibleGroups DIRECTLY (not Array(.enumerated())):
+                            // SwiftUI only attaches the .onMove drag-reorder affordance
+                            // when ForEach is built over the collection itself. Wrapping it
+                            // in .enumerated() to get the ⌘N index silently killed dragging
+                            // (regressed in the jump-hint commit). Derive the index inside.
+                            ForEach(store.visibleGroups) { g in
+                                let idx = store.visibleGroups.firstIndex { $0.id == g.id } ?? 0
                                 row(g, nowTs, index: idx)
                             }
                             .onMove { src, dst in store.moveSlots(fromOffsets: src, toOffset: dst) }
