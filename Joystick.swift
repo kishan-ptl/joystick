@@ -1294,6 +1294,43 @@ struct OpRow: View {
     }
 }
 
+// macOS spends the first click on a background window just to activate it, so a
+// click on a Joystick row while another app is frontmost only raises Joystick —
+// you'd need a second click to actually jump. This transparent overlay makes
+// that first click count: it accepts the first mouse and runs the row's action
+// directly. It claims the hit ONLY while the window is in the background
+// (hitTest returns nil once Joystick is key), so when we're already frontmost
+// SwiftUI's own tap gesture, hover and right-click context menu behave exactly
+// as before. Safe because the row action is non-destructive (focus a terminal);
+// ending a task is keyboard-only and gated, never reachable from a stray click.
+private struct FirstMouseView: NSViewRepresentable {
+    let action: () -> Void
+    func makeNSView(context: Context) -> NSView { Catcher(action: action) }
+    func updateNSView(_ view: NSView, context: Context) {
+        (view as? Catcher)?.action = action
+    }
+
+    final class Catcher: NSView {
+        var action: () -> Void
+        init(action: @escaping () -> Void) {
+            self.action = action
+            super.init(frame: .zero)
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        // Defer entirely to the SwiftUI content underneath while Joystick is key;
+        // only become the hit target (and thus catch the first-mouse click) when
+        // the window is in the background — the exact case we're fixing.
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            (window?.isKeyWindow ?? false) ? nil : super.hitTest(point)
+        }
+
+        override func mouseDown(with event: NSEvent) { action() }
+    }
+}
+
 struct GroupRow: View {
     let group: SurfaceGroup
     let nowTs: Double
@@ -1365,6 +1402,9 @@ struct GroupRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .onTapGesture { action() }
+        // Let the click land on the FIRST press even when Joystick is in the
+        // background (see FirstMouseView). Transparent while we're frontmost.
+        .overlay { FirstMouseView(action: action) }
         .help("Click to focus this tab in Ghostty · right-click to copy")
         .contextMenu { copyMenu(for: group.current) }
         // The keyboard cursor is an accent-tinted FILL across the whole row, not
