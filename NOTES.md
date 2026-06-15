@@ -110,6 +110,32 @@ left of the rename pill / topic.
 - **Scope:** Claude rows only (`wt` only flows through `meta`). Shell rows
   already show their `cwd` and aren't the parallel-session pain point.
 
+## Queued-prompt race — new prompt swallowed by the prior turn's end (2026-06-14)
+
+Symptom: a Claude session "misses a new prompt and keeps the old one" —
+sometimes, and specifically when the prompt was **queued** (typed while the turn
+was still running) or auto-injected (`<task-notification>`).
+
+Root cause: every turn of a session shares one log id (`claude-<sid>`). The Stop
+handler (`close_turn`) is slow — it re-reads the log tail and `tail -n 200 | jq`s
+the transcript for the closing blurb — while `UserPromptSubmit` is fast (surface
++ pid cached). So when the next prompt fires the instant the turn ends (no human
+delay, because it was queued), the new turn's `start` can be appended to the log
+**before** the prior turn's `end`. The fold then sees `start(B)` open op B, then
+`end(A)` remove it — marking the brand-new prompt as a finished row with the old
+turn's duration/blurb, and dropping B's subsequent `active` events (no open op).
+Confirmed in the live log: `start(B) ts=1781486173` immediately followed by
+`end ts=1781486173 dur=343` — the 343s is turn A's real length, not 0.
+
+Fix (viewer fold, `applyEvent`, order-robust like the existing out-of-order
+`meta` handling): on a Claude `start`, if an op is still open for this id, the
+prior turn's end is merely late — finalize it as history before opening the new
+turn. On `end`, drop it if the open op started strictly later than the end's
+implied start (`ts − dur`) — it belongs to a turn already superseded. The
+emitter is left untouched (no cross-process lock; the log stays the only shared
+state). Residual: if the prior turn was <1s AND queued the next, the timestamps
+collide and the guard can't tell them apart — vanishingly rare.
+
 ## Roadmap
 
 ### v0.1 — shareable (1–2 weekends)
