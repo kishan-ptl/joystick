@@ -196,30 +196,48 @@ case $event in
   PreToolUse)
     # A subagent (Task) runs long, but PostToolUse fires only when it FINISHES —
     # so without this the row would sit dead at "working" for the whole run.
-    # Emit the live activity at the START of a Task/Agent so the row shows what
-    # the subagent is doing while it runs. Scoped to Task/Agent on purpose:
-    # every other tool completes fast enough that its PostToolUse subtitle is
-    # timely, and emitting here for all tools would just double every event.
+    # Emit a live subagent line at the START of each Task/Agent, keyed by the
+    # tool_use_id, so several CONCURRENT subagents each show their own line under
+    # the session row (the matching PostToolUse drops that exact line). Scoped to
+    # Task/Agent on purpose: other tools complete fast enough that their
+    # PostToolUse subtitle is timely, and emitting here for all would double events.
     tool=$(jq -r '.tool_name // empty' <<<"$input")
     case $tool in
       Task|Agent) d=$(jq -r '.tool_input.description // .tool_input.subagent_type // ""' <<<"$input") ;;
       *)          exit 0 ;;
     esac
+    sub=$(jq -r '.tool_use_id // empty' <<<"$input")   # ties this start to its finish; "" → old latest-wins
     _joystick_redact "Task: $d"; act=${REPLY[1,120]}   # redact secrets; keep line < PIPE_BUF
-    jq -cn --arg id "$id" --arg act "$act" --argjson ts "$now" \
-      '{v:1,ev:"active",id:$id,act:$act,ts:$ts}' >> "$LOG"
+    jq -cn --arg id "$id" --arg act "$act" --arg sub "$sub" --argjson ts "$now" \
+      '{v:1,ev:"active",id:$id,act:$act,sub:$sub,ts:$ts}' >> "$LOG"
     ;;
   PostToolUse)
     # Surface the tool just used as the live activity subtitle, and clear any
     # waiting state. Fires on every tool use (async hook), so keep it cheap.
     rm -f "${LOG:h}/waiting-$sid"
     tool=$(jq -r '.tool_name // empty' <<<"$input")
+    # A finishing subagent (Task) drops its OWN live line, keyed by the same
+    # tool_use_id its PreToolUse start used — so the right line goes, not whichever
+    # was latest. With no tool_use_id (older Claude Code) fall back to the old
+    # latest-wins subtitle so behaviour degrades gracefully.
+    if [[ $tool == Task || $tool == Agent ]]; then
+      sub=$(jq -r '.tool_use_id // empty' <<<"$input")
+      if [[ -n $sub ]]; then
+        jq -cn --arg id "$id" --arg sub "$sub" --argjson ts "$now" \
+          '{v:1,ev:"active",id:$id,sub:$sub,subdone:true,ts:$ts}' >> "$LOG"
+      else
+        d=$(jq -r '.tool_input.description // .tool_input.subagent_type // ""' <<<"$input")
+        _joystick_redact "Task: $d"; act=${REPLY[1,120]}
+        jq -cn --arg id "$id" --arg act "$act" --argjson ts "$now" \
+          '{v:1,ev:"active",id:$id,act:$act,ts:$ts}' >> "$LOG"
+      fi
+      exit 0
+    fi
     case $tool in
       Bash)       d=$(jq -r '.tool_input.command // ""' <<<"$input"); act="Bash: $d" ;;
       Edit|Write|Read|MultiEdit|NotebookEdit)
                   d=$(jq -r '.tool_input.file_path // ""' <<<"$input"); act="$tool ${d:t}" ;;
       Grep|Glob)  d=$(jq -r '.tool_input.pattern // ""' <<<"$input"); act="$tool: $d" ;;
-      Task|Agent) d=$(jq -r '.tool_input.description // .tool_input.subagent_type // ""' <<<"$input"); act="Task: $d" ;;
       WebFetch)   d=$(jq -r '.tool_input.url // ""' <<<"$input"); act="WebFetch $d" ;;
       WebSearch)  d=$(jq -r '.tool_input.query // ""' <<<"$input"); act="Search: $d" ;;
       "")         act="" ;;
@@ -235,6 +253,13 @@ case $event in
     # A tool errored — surface it as the live activity so the row shows trouble.
     tool=$(jq -r '.tool_name // empty' <<<"$input")
     [[ -n $tool ]] || exit 0
+    # A failed subagent also drops its live line (same key as its start), so a
+    # crashed Task doesn't leave a line hanging under the row forever.
+    if [[ $tool == Task || $tool == Agent ]]; then
+      sub=$(jq -r '.tool_use_id // empty' <<<"$input")
+      [[ -n $sub ]] && jq -cn --arg id "$id" --arg sub "$sub" --argjson ts "$now" \
+        '{v:1,ev:"active",id:$id,sub:$sub,subdone:true,ts:$ts}' >> "$LOG"
+    fi
     jq -cn --arg id "$id" --arg act "⚠ $tool failed" --argjson ts "$now" \
       '{v:1,ev:"active",id:$id,act:$act,ts:$ts}' >> "$LOG"
     ;;
