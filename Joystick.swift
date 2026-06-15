@@ -414,13 +414,14 @@ final class Store: ObservableObject {
                 // External ops (joystick log) have no local pid/surface — keep
                 // them until an `end` event arrives or the TTL elapses.
                 if op.isExternal { return nowTs - op.start < Self.externalTTL }
-                // minRunningSecs debounces trivial shell noise (a blink-and-gone
-                // `ls`/`cd` never flashes a row). A Claude turn is always a
-                // deliberate prompt, so show it the instant it starts — otherwise
-                // a turn that finishes in <5s lands in a dead zone (too young to
-                // show running, and minDoneSecs below drops it from done too).
-                if op.isClaude { return alive(op.pid) }
-                return alive(op.pid) && nowTs - op.start >= Self.minRunningSecs
+                // Must be alive either way. minRunningSecs then debounces trivial
+                // shell noise (a blink-and-gone `ls`/`cd` never flashes a row),
+                // but a Claude turn is always a deliberate prompt — show it the
+                // instant it starts, else a turn that finishes in <5s lands in a
+                // dead zone (too young to show running, and minDoneSecs below
+                // drops it from done too).
+                guard alive(op.pid) else { return false }
+                return op.isClaude || nowTs - op.start >= Self.minRunningSecs
             }
 
         // Stall heuristic for shell ops (interactive prompts like `eas submit`):
