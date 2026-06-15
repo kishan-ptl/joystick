@@ -1276,7 +1276,7 @@ struct OpRow: View {
                 // The label is always the latest command/prompt — the session's
                 // name/topic lives in the badge above (see GroupRow).
                 Text(op.cmd)
-                    .font(.system(.body, design: .monospaced))
+                    .font(.system(.callout, design: .monospaced))
                     .lineLimit(2)
                 if let blurb = op.summary, !blurb.isEmpty, !op.isRunning {
                     // What Claude said when it finished — the reply, distinct
@@ -1518,7 +1518,7 @@ struct GroupRow: View {
     }
 
     // Right-click → copy. Command first (the row's main text), then its
-    // directory. cmd is copied as shown (Claude rows keep their 🤖 prefix).
+    // directory. cmd is copied as shown (Claude rows keep their ✦ prefix).
     @ViewBuilder
     private func copyMenu(for op: Op) -> some View {
         Button { copyToPasteboard(op.cmd) } label: { Label("Copy command", systemImage: "doc.on.doc") }
