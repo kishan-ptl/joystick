@@ -487,8 +487,10 @@ final class Store: ObservableObject {
 
         // Stable order for the keyboard-nav window: each terminal keeps its slot
         // for life (state lives in the glyph, not the position); new terminals
-        // join at the TOP (newest first), closed ones drop out. We never reorder
-        // existing slots, so ↑/↓ cycling and ⌘1–9 stay put.
+        // join at the TOP (newest first), closed ones drop out. We never *auto*-
+        // reorder existing slots, so ↑/↓ cycling and ⌘1–9 stay put — only the
+        // user reorders, by hand, via ⌘↑/⌘↓ or the row's right-click menu
+        // (moveRow, below), and that order persists like any other slot order.
         let present = Set(bySurface.keys)
         let prevSlots = slotOrder
         slotOrder.removeAll { !present.contains($0) }
@@ -666,6 +668,37 @@ final class Store: ObservableObject {
         } else {
             selectedKey = delta >= 0 ? keys.first : keys.last
         }
+    }
+
+    // ⌘↑ / ⌘↓ (and the right-click "Move up/down"): nudge a row one place in the
+    // persisted slot order. We reorder relative to the row's VISIBLE neighbor —
+    // not its raw slotOrder neighbor — so that with a filter active the row swaps
+    // with the row you actually see above/below it, leaving hidden rows where
+    // they sit. No wrap: nudging the top row up (or the bottom down) is a no-op,
+    // which feels right for a hand-placed list. The cursor follows the moved row.
+    @discardableResult
+    func moveRow(_ key: String, _ delta: Int) -> Bool {
+        let vis = visibleGroups.map(\.key)
+        guard let vi = vis.firstIndex(of: key) else { return false }
+        let vj = vi + delta
+        guard vj >= 0, vj < vis.count else { return false }
+        let neighbor = vis[vj]
+        slotOrder.removeAll { $0 == key }
+        guard let ni = slotOrder.firstIndex(of: neighbor) else { return false }
+        slotOrder.insert(key, at: delta > 0 ? ni + 1 : ni)
+        persistSlotOrder()
+        // Re-sort the rendered list to the new slotOrder now, rather than waiting
+        // for the next reload() — same groups, just reindexed by the new order.
+        let byKey = Dictionary(orderedGroups.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })
+        orderedGroups = slotOrder.compactMap { byKey[$0] }
+        selectedKey = key
+        return true
+    }
+
+    @discardableResult
+    func moveSelectedRow(_ delta: Int) -> Bool {
+        guard let key = selectedKey else { return false }
+        return moveRow(key, delta)
     }
 
     private func selectedGroup() -> SurfaceGroup? {
@@ -1305,6 +1338,9 @@ struct GroupRow: View {
     var jumpNumber: Int? = nil     // this row's ⌘N number (1–9), if in range
     var markUnread: (Op) -> Void = { _ in }
     var clearRow: (Op) -> Void = { _ in }
+    var canMoveUp: Bool = false    // window nav only — gates the "Move up" item
+    var canMoveDown: Bool = false  // window nav only — gates the "Move down" item
+    var moveRow: (Int) -> Void = { _ in }   // -1 = up, +1 = down
     let action: () -> Void
 
     // Is this the Ghostty tab/split focused right now? Shell rows group BY
@@ -1406,6 +1442,15 @@ struct GroupRow: View {
         .help("Click to focus this tab in Ghostty · right-click to copy")
         .contextMenu {
             copyMenu(for: group.current)
+            // Hand-reordering lives only in the keyboard-nav window (the menubar
+            // keeps its prioritized sort). Mirrors ⌘↑/⌘↓; disabled at the ends.
+            if keyboardNav {
+                Divider()
+                Button { moveRow(-1) } label: { Label("Move Up", systemImage: "arrow.up") }
+                    .disabled(!canMoveUp)
+                Button { moveRow(1) } label: { Label("Move Down", systemImage: "arrow.down") }
+                    .disabled(!canMoveDown)
+            }
             // "Clear" and "Mark unread" are inverses and never both apply: a row
             // is either flagging something to clear, or already clear (markable).
             if group.current.isWaiting || group.current.unseen {
@@ -1639,7 +1684,7 @@ struct ContentView: View {
     }
 
     private var hintFooter: some View {
-        Text("↑↓ move · ⏎ focus · ⌘1–9 jump · esc close · ⌥⌘J summon")
+        Text("↑↓ move · ⌘↑↓ reorder · ⏎ focus · ⌘1–9 jump · esc close")
             .font(.system(.caption2))
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1730,7 +1775,10 @@ struct ContentView: View {
                  keyboardNav: keyboardNav,
                  jumpNumber: (keyboardNav && index < 9) ? index + 1 : nil,
                  markUnread: { store.markUnread($0) },
-                 clearRow: { store.clearRow($0) }) {
+                 clearRow: { store.clearRow($0) },
+                 canMoveUp: keyboardNav && index > 0,
+                 canMoveDown: keyboardNav && index < store.visibleGroups.count - 1,
+                 moveRow: { store.moveRow(g.key, $0) }) {
             store.selectedKey = g.key   // a mouse click also moves the cursor
             store.focus(g.current)
         }
@@ -1754,8 +1802,12 @@ struct ContentView: View {
                 guard let w = event.window, w.title == "Joystick", w.canBecomeMain else { return false }
                 let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
                 switch Int(event.keyCode) {
-                case 125: store.moveSelection(1); return true       // ↓
-                case 126: store.moveSelection(-1); return true      // ↑
+                case 125:                                           // ↓  (⌘↓ reorders down)
+                    if flags == .command { store.moveSelectedRow(1) } else { store.moveSelection(1) }
+                    return true
+                case 126:                                           // ↑  (⌘↑ reorders up)
+                    if flags == .command { store.moveSelectedRow(-1) } else { store.moveSelection(-1) }
+                    return true
                 case 36, 76:                                        // ⏎ / enter
                     store.activateSelection()   // focus Ghostty; leave Joystick up
                     return true

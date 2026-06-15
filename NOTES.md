@@ -119,6 +119,27 @@ per-row NSView overlay) and a single-click focus path that isn't `.onTapGesture`
 (e.g. `List(selection:)` with a click-only binding kept separate from the
 keyboard cursor).
 
+## Reorder by ⌘↑/⌘↓ + right-click, not drag (2026-06-15)
+
+The replacement for the removed drag-to-reorder (above): you nudge a row with
+**⌘↑ / ⌘↓**, or right-click it → **Move Up / Move Down**. Both route through
+`Store.moveRow(key, delta)`. This sidesteps the entire gesture-arbitration
+problem that killed drag — there's no press-drag to starve, so the
+`.onTapGesture { focus }` and the `FirstMouseView` overlay both keep working
+untouched. Reorder is keyboard/menu, focus is click; they never contend.
+
+- `moveRow` reorders relative to the row's **visible** neighbor (not its raw
+  `slotOrder` neighbor), so with a filter active the row swaps with the row you
+  actually see — hidden rows stay put. **No wrap**: nudging the top row up (or
+  bottom down) is a no-op, which is what a hand-placed list should do.
+- Writes straight through to the persisted `slotOrder` (same UserDefaults key as
+  the auto first-seen order) and re-sorts `orderedGroups` immediately, so the
+  move shows before the next `reload()`. The cursor follows the moved row.
+- **⌘↑/⌘↓** are gated on the command modifier inside the existing key monitor
+  (keyCodes 126/125); bare ↑/↓ still just move the cursor. The right-click items
+  appear only in the keyboard-nav window (`keyboardNav`), disabled at the ends —
+  the menubar popover keeps its prioritized sort, no reordering there.
+
 ## Worktree chip on Claude rows (2026-06-14)
 
 We routinely run several Claude sessions on this repo at once, each in its own
