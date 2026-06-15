@@ -151,6 +151,37 @@ surfaced, currently-seen row (running/external/already-unseen have nothing to do
 Edge: marking unread the tab you're *currently* focused in Ghostty re-clears on
 the next focus poll — correct, you're looking at it.
 
+## Subagent lines vs. async Task dispatch (2026-06-15)
+
+Symptom: live subagent (Task/Agent) lines never showed, despite the feature
+being built — a row stayed dead during a long subagent run. Proven live: a 29s
+subagent emitted its START and its DONE in the **same log second** while it kept
+working.
+
+Root cause: Claude Code now runs subagents **asynchronously**. The Task tool
+call returns at *dispatch* ("Async agent launched successfully"), so its
+`PostToolUse` fires immediately — it no longer means "subagent finished." The
+hook was built for the old synchronous model and emitted `subdone` from that
+PostToolUse, killing the live line the instant `PreToolUse` created it. The real
+completion arrives much later as an injected `<task-notification>` carrying the
+**original `<tool-use-id>`** (= the `sub` key the START used).
+
+Fix (`claude-hook.sh`): stop emitting `subdone` from PostToolUse for Task/Agent.
+The START line now lives until the turn ends, where the viewer's existing
+`isRunning` gate (`endTs == nil`) hides it — **no Swift change needed**; a fresh
+turn `start` also resets `liveSubagents`. Also: UserPromptSubmit now labels the
+injected `<task-notification>` turn from its `<summary>` (e.g. `» Agent "…"
+completed`) instead of dumping raw XML into the row.
+
+Tradeoff (accepted): a subagent that finishes **mid-turn** fires no hook
+(mid-turn completions are injected silently, unlike idle ones which fire
+UserPromptSubmit), so its line lingers until the turn ends — a minor over-show
+vs. the prior zero-seconds. Rejected the alternative (scan the transcript for
+completed notifications on every PostToolUse) as a real per-tool-call cost in the
+hot path for marginal precision. Net perf is neutral-to-faster: removes a
+per-Task log write, adds only a cheap string check in the once-per-turn
+UserPromptSubmit path.
+
 ## Roadmap
 
 ### v0.1 — shareable (1–2 weekends)
