@@ -94,6 +94,38 @@ enum SetupResult: Equatable { case ok, failed(String) }
 // means the user said no (or it's off in Privacy settings) — we surface a banner.
 enum AutomationStatus { case granted, denied, notDetermined, unknown }
 
+// The time window for the header turn-count, selectable from the count menu.
+// Days are 4am-aligned (see Store.fourAMDayStart) so a "day" tracks when you
+// actually work, not the midnight clock — a 2am session still counts as
+// yesterday. `days` is how many such days the window spans.
+enum TallyRange: String, CaseIterable {
+    case d1, d3, d7, m1
+    var days: Int {
+        switch self {
+        case .d1: return 1
+        case .d3: return 3
+        case .d7: return 7
+        case .m1: return 30
+        }
+    }
+    var label: String {   // compact tag shown next to the count
+        switch self {
+        case .d1: return "1d"
+        case .d3: return "3d"
+        case .d7: return "7d"
+        case .m1: return "1mo"
+        }
+    }
+    var menuLabel: String {   // longer label in the dropdown
+        switch self {
+        case .d1: return "Today (1d)"
+        case .d3: return "Last 3 days"
+        case .d7: return "Last 7 days"
+        case .m1: return "Last month"
+        }
+    }
+}
+
 // MARK: - Store
 
 @MainActor
@@ -104,7 +136,8 @@ final class Store: ObservableObject {
     // the keyboard-nav window. Stable slots — see slotOrder in reload().
     @Published var orderedGroups: [SurfaceGroup] = []
     @Published var now = Date()
-    @Published var commandsToday = 0   // shell + Claude turns started today (local time)
+    @Published var commandsToday = 0   // shell + Claude turns started in the selected window
+    @Published var tallyRange: TallyRange = .d1   // which window the count covers (persisted)
     // First-run onboarding state. shellWired/claudeWired reflect whether the zsh
     // hook and Claude hooks are actually present; the banner uses them to offer
     // one-click setup (running the bundled install.sh) instead of manual steps.
@@ -184,9 +217,11 @@ final class Store: ObservableObject {
     // the log-watch model's quiet.
     private var focusTick: Timer?
     private var focusObserver: NSObjectProtocol?
-    // Daily command tally (shell + Claude turns started today, local time). Driven
-    // incrementally as starts are folded; recomputed from the log only on a day
-    // change (backfill), and persisted so it survives restarts and log rotation.
+    // Windowed turn tally (shell + Claude turns started since the window start).
+    // Driven incrementally as starts are folded; recomputed from the log on a
+    // window-boundary roll or a range change (backfill), and persisted so it
+    // survives restarts and log rotation. tallyDayStart is the window's start
+    // instant — a 4am-aligned day boundary, possibly several days back.
     private var tallyDayStart: TimeInterval = 0
     private var needsBackfill = false
 
@@ -203,6 +238,8 @@ final class Store: ObservableObject {
         slotOrder = UserDefaults.standard.stringArray(forKey: "slotOrder") ?? []
         commandsToday = UserDefaults.standard.integer(forKey: "commandsToday")
         tallyDayStart = UserDefaults.standard.double(forKey: "tallyDayStart")
+        if let raw = UserDefaults.standard.string(forKey: "tallyRange"),
+           let r = TallyRange(rawValue: raw) { tallyRange = r }
         refreshWiring()
         refreshAutomation()
         reload()
@@ -788,16 +825,43 @@ final class Store: ObservableObject {
         }
     }
 
-    // If the local day has changed since the tally was last anchored, reset it and
-    // force a cold re-read so the new day's count is backfilled from the log.
+    // The 4am boundary (local time) of the "day" containing `date`. A day begins
+    // at 4am, not midnight, so a late-night session counts under the day you
+    // started it; before 4am, the current day began at yesterday's 4am.
+    private func fourAMDayStart(_ date: Date) -> TimeInterval {
+        let cal = Calendar.current
+        let today4 = cal.date(bySettingHour: 4, minute: 0, second: 0, of: date) ?? date
+        let start = today4 <= date ? today4
+                  : (cal.date(byAdding: .day, value: -1, to: today4) ?? today4)
+        return start.timeIntervalSince1970
+    }
+
+    // Start of the currently-selected count window: the 4am boundary of today,
+    // minus (range − 1) whole days, so "3d" spans today plus the two prior days.
+    private func windowStart(for date: Date) -> TimeInterval {
+        fourAMDayStart(date) - Double(tallyRange.days - 1) * 86_400
+    }
+
+    // If the window start has moved since the tally was last anchored — a 4am
+    // roll, or a range change — reset it and force a cold re-read so the new
+    // window's count is backfilled from the log.
     private func rolloverTallyIfNeeded() {
-        let dayStart = Calendar.current.startOfDay(for: now).timeIntervalSince1970
-        guard dayStart != tallyDayStart else { return }
-        tallyDayStart = dayStart
+        let start = windowStart(for: now)
+        guard start != tallyDayStart else { return }
+        tallyDayStart = start
         commandsToday = 0
         needsBackfill = true
         lastReadOffset = 0; parsedOpen = [:]; parsedDone = []; parsedMeta = [:]
         persistTally()
+    }
+
+    // Switch the count window. reload() → rolloverTallyIfNeeded sees the new
+    // window start and backfills the count from the log.
+    func setTallyRange(_ r: TallyRange) {
+        guard r != tallyRange else { return }
+        tallyRange = r
+        UserDefaults.standard.set(r.rawValue, forKey: "tallyRange")
+        reload()
     }
 
     // Shell commands + Claude turns count toward the daily tally; external
@@ -1590,7 +1654,16 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 400, minHeight: 320)
-        .background { if keyboardNav { VisualEffectBackground().ignoresSafeArea() } }
+        .background {
+            if keyboardNav {
+                // Frosted glass, but dialed back: a window-colored tint over the
+                // behind-window vibrancy mutes how much of the desktop bleeds
+                // through, so the blur reads as a quiet backdrop, not a feature.
+                VisualEffectBackground()
+                    .overlay(Color(nsColor: .windowBackgroundColor).opacity(0.55))
+                    .ignoresSafeArea()
+            }
+        }
         .onAppear {
             store.refreshWiring()
             store.refreshAutomation()
@@ -1666,10 +1739,25 @@ struct ContentView: View {
             Text(parts.isEmpty ? "Idle" : parts.joined(separator: " · "))
                 .font(.system(.subheadline).weight(.semibold))
             Spacer()
-            Text("❯ \(store.commandsToday) today")
-                .font(.system(.caption))
-                .foregroundStyle(.secondary)
-                .help("Shell commands + Claude turns started today")
+            Menu {
+                Picker("Window", selection: Binding(
+                    get: { store.tallyRange },
+                    set: { store.setTallyRange($0) }
+                )) {
+                    ForEach(TallyRange.allCases, id: \.self) { r in
+                        Text(r.menuLabel).tag(r)
+                    }
+                }
+                .pickerStyle(.inline)
+            } label: {
+                Text("❯ \(store.commandsToday) turns · \(store.tallyRange.label)")
+                    .font(.system(.caption))
+                    .foregroundStyle(.secondary)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Shell commands + Claude turns in the selected window (days start at 4am)")
             Toggle("Pin", isOn: $floatOnTop)
                 .toggleStyle(.switch)
                 .controlSize(.mini)
