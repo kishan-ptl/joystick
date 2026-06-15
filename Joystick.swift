@@ -177,6 +177,13 @@ final class Store: ObservableObject {
     private var lastFocusPoll = Date.distantPast
     // surface id -> last time it was focused while Ghostty was frontmost
     private var seenAt: [String: Double] = [:]
+    // group key -> when the user right-click "Clear"ed its waiting light. We
+    // suppress only the wait instance that was live at that moment; a genuinely
+    // newer wait (Claude re-prompts, or a fresh stall after output resumes)
+    // starts after this stamp and re-raises the light. In-memory only — the
+    // wait is itself a live signal, so after an app restart it's right to show
+    // a still-blocked terminal again (unlike seenAt, which must outlive launches).
+    private var clearedWaitingAt: [String: Double] = [:]
     // Refresh is event-driven (see startWatching): an FS watch on the log fires
     // reload() within ~tens of ms of a new event, instead of a 1 Hz poll. The
     // active tick runs at 1 Hz only while something is running (to advance the
@@ -439,7 +446,23 @@ final class Store: ObservableObject {
                 case nil: break
                 }
             }
+            // Right-click "Clear" (see clearRow) dismisses the wait that was live
+            // when you cleared. A Claude wait starts at waitingSince; a shell stall
+            // started ~stallIdle seconds ago. While that same instance persists its
+            // start stays <= the clear stamp, so it stays hidden; a fresh wait later
+            // starts after it and shows again. The slop absorbs the 5s probe jitter.
+            if let cleared = clearedWaitingAt[op.groupKey],
+               let waitStart = op.waitingSince ?? op.stallIdle.map({ nowTs - $0 }),
+               waitStart <= cleared + 1.5 {
+                op.waitingSince = nil; op.waitingMsg = nil; op.stallIdle = nil
+            }
             return op
+        }
+        // Drop clear-stamps whose terminal/session is no longer running — a wait
+        // can only reappear on something live, so the rest are dead weight.
+        if !clearedWaitingAt.isEmpty {
+            let liveKeys = Set(running.map(\.groupKey))
+            clearedWaitingAt = clearedWaitingAt.filter { liveKeys.contains($0.key) }
         }
         notifyNewlyWaiting(running: running)
 
@@ -653,6 +676,22 @@ final class Store: ObservableObject {
         guard !op.surface.isEmpty, let end = op.endTs else { return }
         seenAt[op.surface] = end - 1
         persistSeen()
+        reload()
+    }
+
+    // Right-click → "Clear": acknowledge whatever this row is flagging, without
+    // switching to the tab. A row flags exactly one thing at a time — the breathing
+    // waiting light (running) or the blue unseen dot (finished) — so one action
+    // covers both. Each reuses an organic, self-healing model rather than a sticky
+    // "dismissed" flag: marking seen is exactly what focusing the tab does, and the
+    // waiting stamp only hides the current wait (a new prompt/stall re-raises it).
+    func clearRow(_ op: Op) {
+        if op.isWaiting {
+            clearedWaitingAt[op.groupKey] = now.timeIntervalSince1970
+        } else if op.unseen, !op.surface.isEmpty {
+            seenAt[op.surface] = now.timeIntervalSince1970
+            persistSeen()
+        }
         reload()
     }
 
@@ -1454,6 +1493,7 @@ struct GroupRow: View {
     var keyboardNav: Bool = false  // window list — shows the ⌘N jump hint
     var jumpNumber: Int? = nil     // this row's ⌘N number (1–9), if in range
     var markUnread: (Op) -> Void = { _ in }
+    var clearRow: (Op) -> Void = { _ in }
     let action: () -> Void
 
     // Is this the Ghostty tab/split focused right now? Shell rows group BY
@@ -1555,7 +1595,16 @@ struct GroupRow: View {
         .help("Click to focus this tab in Ghostty · right-click to copy")
         .contextMenu {
             copyMenu(for: group.current)
-            if canMarkUnread(group.current) {
+            // "Clear" and "Mark unread" are inverses and never both apply: a row
+            // is either flagging something to clear, or already clear (markable).
+            if group.current.isWaiting || group.current.unseen {
+                Divider()
+                let waiting = group.current.isWaiting
+                Button { clearRow(group.current) } label: {
+                    Label(waiting ? "Clear" : "Mark as read",
+                          systemImage: waiting ? "bell.slash" : "circle")
+                }
+            } else if canMarkUnread(group.current) {
                 Divider()
                 Button { markUnread(group.current) } label: {
                     Label("Mark unread", systemImage: "circle.fill")
@@ -1870,7 +1919,8 @@ struct ContentView: View {
                  isSelected: keyboardNav && g.key == store.selectedKey,
                  keyboardNav: keyboardNav,
                  jumpNumber: (keyboardNav && index < 9) ? index + 1 : nil,
-                 markUnread: { store.markUnread($0) }) {
+                 markUnread: { store.markUnread($0) },
+                 clearRow: { store.clearRow($0) }) {
             store.selectedKey = g.key   // a mouse click also moves the cursor
             store.focus(g.current)
         }
