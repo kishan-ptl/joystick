@@ -775,8 +775,14 @@ final class Store: ObservableObject {
 
         let decoder = JSONDecoder()
         let allLines = Array(complete.split(separator: 0x0A, omittingEmptySubsequences: true))
-        // Fold only the recent window on a cold read; everything on an incremental read.
-        let foldStart = cold ? max(0, allLines.count - 4000) : 0
+        // Fold the WHOLE file, cold read included. A cold read happens on launch, on
+        // the 4am rollover, and on rotation — and an earlier "last 4000 lines only"
+        // cold window silently dropped any op whose `start` had scrolled past line
+        // 4000. Long-running services (npx expo start, next dev, ngrok) have the
+        // OLDEST starts, so they were the first to vanish on the next restart/rollover
+        // even while their process stayed alive. The fold is bounded regardless: the
+        // log rotates at ~5MB and `done` is trimmed to maxDoneRetained below.
+        let foldStart = 0
         // Count today's commands over all NEW lines incrementally, or over the whole
         // file during a day-change backfill. A plain cold read (rotation/restart)
         // counts nothing — the persisted tally already covers it.
