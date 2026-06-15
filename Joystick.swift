@@ -1518,7 +1518,7 @@ struct GroupRow: View {
     }
 
     // Right-click → copy. Command first (the row's main text), then its
-    // directory. cmd is copied as shown (Claude rows keep their ❯ prefix).
+    // directory. cmd is copied as shown (Claude rows keep their » prefix).
     @ViewBuilder
     private func copyMenu(for op: Op) -> some View {
         Button { copyToPasteboard(op.cmd) } label: { Label("Copy command", systemImage: "doc.on.doc") }
