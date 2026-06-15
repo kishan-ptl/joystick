@@ -53,7 +53,7 @@ _joystick_get_surface() {
   # Not resolved yet — kick the lookup off the foreground path, once per shell.
   if [[ ${TERM_PROGRAM:-} == ghostty && -z ${_joystick_surface_pending:-} ]]; then
     typeset -g _joystick_surface_pending=1
-    ( osascript -e 'tell application "Ghostty" to get id of focused terminal of selected tab of front window' 2>/dev/null > "$cache" ) &!
+    ( { osascript -e 'tell application "Ghostty" to get id of focused terminal of selected tab of front window' > "$cache"; } 2>/dev/null ) &!
   fi
 }
 
@@ -78,13 +78,16 @@ _joystick_preexec() {
   # while each line is < ~4096 bytes (PIPE_BUF). Don't raise it past ~3KB.
   _joystick_esc "${raw[1,300]}"; cmd=$REPLY
   _joystick_esc "$PWD"; cwd=$REPLY
-  print -r -- "{\"v\":1,\"kind\":\"shell\",\"ev\":\"start\",\"id\":\"$_joystick_id\",\"cmd\":\"$cmd\",\"cwd\":\"$cwd\",\"pid\":$$,\"tty\":\"${TTY:t}\",\"surface\":\"$surface\",\"ts\":$EPOCHSECONDS}" >> "$JOYSTICK_LOG"
+  # brace-group the redirect so a deleted log dir can't spew "no such file"
+  # to the prompt: zsh reports a failed >> open on its OWN stderr while setting
+  # up the command, so a trailing `2>/dev/null` is too late — only wrapping is.
+  { print -r -- "{\"v\":1,\"kind\":\"shell\",\"ev\":\"start\",\"id\":\"$_joystick_id\",\"cmd\":\"$cmd\",\"cwd\":\"$cwd\",\"pid\":$$,\"tty\":\"${TTY:t}\",\"surface\":\"$surface\",\"ts\":$EPOCHSECONDS}" >> "$JOYSTICK_LOG"; } 2>/dev/null
 }
 
 _joystick_precmd() {
   local code=$?
   [[ -n ${_joystick_id:-} ]] || return 0
-  print -r -- "{\"v\":1,\"ev\":\"end\",\"id\":\"$_joystick_id\",\"exit\":$code,\"dur\":$((EPOCHSECONDS - _joystick_start)),\"ts\":$EPOCHSECONDS}" >> "$JOYSTICK_LOG"
+  { print -r -- "{\"v\":1,\"ev\":\"end\",\"id\":\"$_joystick_id\",\"exit\":$code,\"dur\":$((EPOCHSECONDS - _joystick_start)),\"ts\":$EPOCHSECONDS}" >> "$JOYSTICK_LOG"; } 2>/dev/null
   unset _joystick_id _joystick_start
 }
 
@@ -92,7 +95,7 @@ _joystick_precmd() {
 # emit an end event with exit -1 so the viewer doesn't show it forever.
 _joystick_exit() {
   [[ -n ${_joystick_id:-} ]] || return 0
-  print -r -- "{\"v\":1,\"ev\":\"end\",\"id\":\"$_joystick_id\",\"exit\":-1,\"dur\":$((EPOCHSECONDS - _joystick_start)),\"ts\":$EPOCHSECONDS}" >> "$JOYSTICK_LOG" 2>/dev/null
+  { print -r -- "{\"v\":1,\"ev\":\"end\",\"id\":\"$_joystick_id\",\"exit\":-1,\"dur\":$((EPOCHSECONDS - _joystick_start)),\"ts\":$EPOCHSECONDS}" >> "$JOYSTICK_LOG"; } 2>/dev/null
 }
 
 add-zsh-hook preexec _joystick_preexec
