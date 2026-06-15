@@ -82,11 +82,13 @@ close_turn() {  # $1 = exit code  $2 = notify title  $3 = notify verb
   # single read races the writer and grabs the PREVIOUS turn's blurb. Poll for
   # an end_turn message stamped at/after THIS turn's start: the timestamp gate
   # guarantees we never show a stale prior-turn reply, and the poll waits out
-  # the flush. Give up blank (omit msg) after ~1.5s so a turn with no final
-  # text — interrupt, tool-call end — doesn't hang the hook. Then flatten to one
+  # the flush. On StopFailure (interrupt/failure — $1≠0) there's no closing
+  # reply coming, so skip the poll entirely and stay instant on the action you
+  # most want snappy; on a normal Stop, give up blank (omit msg) after ~1.5s if
+  # no end_turn shows (a turn that ended on a tool call). Then flatten to one
   # line + redact + cap like every free-text field (< PIPE_BUF, no secrets).
   tpath=$(claude_transcript)
-  if [[ -n $tpath ]]; then
+  if [[ $1 == 0 && -n $tpath ]]; then
     local tries=0
     while (( tries < 15 )); do
       summary=$(tail -n 400 "$tpath" | jq -rc --argjson since "$start_ts" \
