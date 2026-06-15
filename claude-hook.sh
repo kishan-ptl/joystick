@@ -1,9 +1,10 @@
 #!/bin/zsh
 # claude-hook.sh — Claude Code hook handler for joystick. Wired in
-# ~/.claude/settings.json to: UserPromptSubmit, Stop, StopFailure, Notification,
-# PostToolUse, PostToolUseFailure.
+# ~/.claude/settings.json to: UserPromptSubmit, PreToolUse, Stop, StopFailure,
+# Notification, PostToolUse, PostToolUseFailure.
 #
 # UserPromptSubmit      -> "start" (turn shows as running)
+# PreToolUse            -> "active" at the START of a Task/Agent (subagents only)
 # Stop / StopFailure    -> "end" (exit 0 / 1) + done / failed desktop notification
 # Notification          -> "waiting" (blocked on you) + notification
 # PostToolUse(Failure)  -> "active" carrying live activity (or "⚠ tool failed")
@@ -191,6 +192,22 @@ case $event in
     if ! ghostty_frontmost; then
       notify "Claude Code — waiting" "$msg (${cwd:t})"
     fi
+    ;;
+  PreToolUse)
+    # A subagent (Task) runs long, but PostToolUse fires only when it FINISHES —
+    # so without this the row would sit dead at "working" for the whole run.
+    # Emit the live activity at the START of a Task/Agent so the row shows what
+    # the subagent is doing while it runs. Scoped to Task/Agent on purpose:
+    # every other tool completes fast enough that its PostToolUse subtitle is
+    # timely, and emitting here for all tools would just double every event.
+    tool=$(jq -r '.tool_name // empty' <<<"$input")
+    case $tool in
+      Task|Agent) d=$(jq -r '.tool_input.description // .tool_input.subagent_type // ""' <<<"$input") ;;
+      *)          exit 0 ;;
+    esac
+    _joystick_redact "Task: $d"; act=${REPLY[1,120]}   # redact secrets; keep line < PIPE_BUF
+    jq -cn --arg id "$id" --arg act "$act" --argjson ts "$now" \
+      '{v:1,ev:"active",id:$id,act:$act,ts:$ts}' >> "$LOG"
     ;;
   PostToolUse)
     # Surface the tool just used as the live activity subtitle, and clear any

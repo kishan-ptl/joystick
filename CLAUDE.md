@@ -15,7 +15,7 @@ shared state and doubles as the future integration API.
 
 - **Emitters** (tiny, stateless, fail-silent) append events:
   - `joystick.zsh` — zsh preexec/precmd hooks (`_joystick_*`), sourced from `~/.zshrc`.
-  - `claude-hook.sh` — Claude Code hooks (UserPromptSubmit / Stop(+StopFailure) / Notification / PostToolUse(+…Failure)) in `~/.claude/settings.json`. On turn close it also emits a `meta` event (session title/model/mode/context) and attaches Claude's closing blurb as `msg` on the `end` event.
+  - `claude-hook.sh` — Claude Code hooks (UserPromptSubmit / PreToolUse / Stop(+StopFailure) / Notification / PostToolUse(+…Failure)) in `~/.claude/settings.json`. `PreToolUse` emits live activity at the *start* of a Task/Agent only (subagents run long; without it the row sits dead at "working" until the subagent finishes). On turn close it also emits a `meta` event (session title/model/mode/context) and attaches Claude's closing blurb as `msg` on the `end` event.
   - `joystick` CLI (`joystick log …`, tty `cli`) — external events from CI, webhooks, Makefiles. Symlinked onto PATH at `~/.local/bin/joystick`. Schema + usage in `EVENTS.md`.
 - **Event log** — `~/.local/state/joystick/events.jsonl`, append-only JSONL,
   one source of truth. Events: `start` / `end` / `waiting` / `active` / `meta`.
