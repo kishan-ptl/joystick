@@ -1293,7 +1293,9 @@ struct OpRow: View {
             }
             Spacer(minLength: 12)
             Text(timeText)
-                .font(.system(.callout).weight(.medium).monospacedDigit())
+                // Deliberately small — the time is a glance detail that sits just
+                // left of the ⌘N helper; the command is the row's focus, not this.
+                .font(.system(size: 10, weight: .regular).monospacedDigit())
                 .foregroundStyle(op.isService ? Color.green
                                  : (op.isRunning && op.isClaude && !op.isWaiting) ? Color.claudeOrange
                                  : op.isRunning ? Color.accentColor : .secondary)
