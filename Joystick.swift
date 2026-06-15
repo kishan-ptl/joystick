@@ -1324,6 +1324,12 @@ struct GroupRow: View {
     var clearRow: (Op) -> Void = { _ in }
     let action: () -> Void
 
+    // Only mount the first-mouse overlay while the window is inactive (see the
+    // overlay below): it's a hosted NSView and its mere presence in a row breaks
+    // List's drag-to-reorder, so we keep it out of the view tree whenever the
+    // window is key/active — which is exactly when you'd be dragging.
+    @Environment(\.controlActiveState) private var activeState
+
     // Is this the Ghostty tab/split focused right now? Shell rows group BY
     // surface (group.key), so that's an exact hit. Claude rows group by
     // claude-<sid> and carry only a best-effort surface snapshot on current.surface
@@ -1418,8 +1424,10 @@ struct GroupRow: View {
         .contentShape(Rectangle())
         .onTapGesture { action() }
         // Let the click land on the FIRST press even when Joystick is in the
-        // background (see FirstMouseView). Transparent while we're frontmost.
-        .overlay { FirstMouseView(action: action) }
+        // background (see FirstMouseView). Only present while the window is
+        // inactive — when it's key/active the overlay is gone so List's
+        // drag-to-reorder works (the hosted NSView would otherwise block it).
+        .overlay { if activeState == .inactive { FirstMouseView(action: action) } }
         .help("Click to focus this tab in Ghostty · right-click to copy")
         .contextMenu {
             copyMenu(for: group.current)
