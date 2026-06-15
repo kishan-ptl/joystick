@@ -629,7 +629,8 @@ final class Store: ObservableObject {
         let keys = visibleGroups.map(\.key)
         guard !keys.isEmpty else { selectedKey = nil; return }
         if let cur = selectedKey.flatMap({ keys.firstIndex(of: $0) }) {
-            selectedKey = keys[min(max(cur + delta, 0), keys.count - 1)]   // clamp, don't wrap
+            let n = keys.count
+            selectedKey = keys[((cur + delta) % n + n) % n]   // wrap both ends (↓ last → first)
         } else {
             selectedKey = delta >= 0 ? keys.first : keys.last
         }
@@ -1301,23 +1302,15 @@ struct GroupRow: View {
         .onTapGesture { action() }
         .help("Click to focus this tab in Ghostty · right-click to copy")
         .contextMenu { copyMenu(for: group.current) }
-        // The keyboard cursor: an accent bar down the leading edge, deliberately
-        // LOUDER and a different color than the quiet grey "you are here" below —
-        // so "the row I'm about to act on" never reads as "the tab I'm in".
-        .overlay(alignment: .leading) {
-            if isSelected {
-                RoundedRectangle(cornerRadius: 1.5)
-                    .fill(Color.accentColor)
-                    .frame(width: 3)
-                    .padding(.vertical, 1)
-            }
-        }
-        // Backgrounds, in priority order: keyboard selection (accent) beats
-        // "you are here" (neutral grey, the system's inactive-selection fill)
-        // beats nothing. Grey stays quiet so it never competes with the colored
-        // ✋/▶/◉/✓/✗ state glyphs.
+        // The keyboard cursor is an accent-tinted FILL across the whole row, not
+        // a leading bar — a leading bar sat right on top of the blue unseen-
+        // result dot (both at the row's leading edge, both blue) and read as one
+        // smudged marker. Priority: selection (accent) beats "you are here"
+        // (neutral grey, the system's inactive-selection fill) beats nothing. The
+        // hue difference (blue vs grey) tells the cursor from the tab-you're-in,
+        // and grey stays quiet so neither competes with the ✋/▶/◉/✓/✗ glyphs.
         .listRowBackground(
-            isSelected ? Color.accentColor.opacity(0.20)
+            isSelected ? Color.accentColor.opacity(0.28)
             : isFocused ? Color(nsColor: .unemphasizedSelectedContentBackgroundColor).opacity(0.5)
             : Color.clear
         )
