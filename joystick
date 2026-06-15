@@ -37,9 +37,9 @@ sub=${1:-}; [[ -n $sub ]] && shift
 exit_code=0 took=0 id="" parts=()
 while (( $# )); do
   case $1 in
-    --exit) exit_code=${2:-0}; shift 2 ;;
-    --took) took=${2:-0};      shift 2 ;;
-    --id)   id=${2:-};         shift 2 ;;
+    --exit) exit_code=${2:-0}; shift $(( $# > 1 ? 2 : 1 )) ;;
+    --took) took=${2:-0};      shift $(( $# > 1 ? 2 : 1 )) ;;
+    --id)   id=${2:-};         shift $(( $# > 1 ? 2 : 1 )) ;;
     *)      parts+=$1;         shift ;;
   esac
 done

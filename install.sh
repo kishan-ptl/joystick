@@ -102,6 +102,7 @@ install_hooks() {
     def async: {hooks:[{type:"command",command:$cmd,timeout:10,async:true}]};
     .hooks //= {}
     | .hooks.UserPromptSubmit   = (((.hooks.UserPromptSubmit   // []) | strip) + [sync])
+    | .hooks.PreToolUse         = (((.hooks.PreToolUse         // []) | strip) + [async])
     | .hooks.Stop               = (((.hooks.Stop               // []) | strip) + [async])
     | .hooks.StopFailure        = (((.hooks.StopFailure        // []) | strip) + [async])
     | .hooks.Notification       = (((.hooks.Notification       // []) | strip) + [async])
@@ -109,7 +110,7 @@ install_hooks() {
     | .hooks.PostToolUseFailure = (((.hooks.PostToolUseFailure // []) | strip) + [async])
   ' "$CLAUDE_SETTINGS" > "$tmp" || die "jq merge failed"
   mv "$tmp" "$CLAUDE_SETTINGS"
-  ok "6 hooks wired to $cmd"
+  ok "7 hooks wired to $cmd"
 }
 
 summary() {

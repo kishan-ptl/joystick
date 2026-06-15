@@ -415,20 +415,22 @@ final class Store: ObservableObject {
         rolloverTallyIfNeeded()
         parseLogIfChanged()
 
+        // Free open ops whose host is gone (closed tab / quit session / expired
+        // external). The running filter would hide them anyway; pruning here is what
+        // stops parsedOpen growing unbounded between rotations, and keeps a stale id
+        // from mis-feeding the Claude late-end merge in applyEvent.
+        parsedOpen = parsedOpen.filter { opHostAlive($0.value, nowTs: nowTs) }
+
+        // parsedOpen now holds only live-host ops, so this is just the cosmetic gate:
+        // hide ignored interactive apps, and debounce trivial shell noise (a
+        // blink-and-gone `ls`/`cd` never flashes a row). External + Claude rows are
+        // each a deliberate event — show them the instant they start, so a turn that
+        // finishes in <minRunningSecs doesn't fall into the dead zone between "too
+        // young to show running" and "too short to show done".
         var running = parsedOpen.values
             .filter { op in
                 guard !ignored(op.cmd) else { return false }
-                // External ops (joystick log) have no local pid/surface — keep
-                // them until an `end` event arrives or the TTL elapses.
-                if op.isExternal { return nowTs - op.start < Self.externalTTL }
-                // Must be alive either way. minRunningSecs then debounces trivial
-                // shell noise (a blink-and-gone `ls`/`cd` never flashes a row),
-                // but a Claude turn is always a deliberate prompt — show it the
-                // instant it starts, else a turn that finishes in <5s lands in a
-                // dead zone (too young to show running, and minDoneSecs below
-                // drops it from done too).
-                guard alive(op.pid) else { return false }
-                return op.isClaude || nowTs - op.start >= Self.minRunningSecs
+                return op.isExternal || op.isClaude || nowTs - op.start >= Self.minRunningSecs
             }
 
         // Stall heuristic for shell ops (interactive prompts like `eas submit`):
@@ -591,9 +593,7 @@ final class Store: ObservableObject {
         // whose pid died without an `end`. With no live open op there's nothing
         // to animate, so the tick is torn down and the app idles silently; the
         // FS watch alone wakes it when the next event lands.
-        let liveOpen = parsedOpen.values.contains {
-            $0.isExternal ? (nowTs - $0.start < Self.externalTTL) : alive($0.pid)
-        }
+        let liveOpen = parsedOpen.values.contains { opHostAlive($0, nowTs: nowTs) }
         updateActiveTick(liveOpen)
     }
 
@@ -1000,6 +1000,15 @@ final class Store: ObservableObject {
     private func alive(_ pid: Int32) -> Bool {
         guard pid > 0 else { return false }
         return kill(pid, 0) == 0 || errno == EPERM
+    }
+
+    // Is an open op's host still around? A shell/Claude op lives while its process
+    // does (tab open / session running); an external `joystick log` op (no local
+    // pid) lives until its TTL elapses. Single source of truth: the running-view
+    // filter, the active-tick liveOpen check, and parsedOpen pruning all gate on
+    // this, so "hidden from the view" and "freed from memory" can't drift apart.
+    private func opHostAlive(_ op: Op, nowTs: Double) -> Bool {
+        op.isExternal ? (nowTs - op.start < Self.externalTTL) : alive(op.pid)
     }
 
     // Classifies what a tty's foreground is doing:
