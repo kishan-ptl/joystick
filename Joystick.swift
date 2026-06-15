@@ -488,7 +488,7 @@ final class Store: ObservableObject {
         // Stable order for the keyboard-nav window: each terminal keeps its slot
         // for life (state lives in the glyph, not the position); new terminals
         // join at the TOP (newest first), closed ones drop out. We never reorder
-        // existing slots, so ↑/↓ cycling, ⌘1–9, and any drag-reordering stay put.
+        // existing slots, so ↑/↓ cycling and ⌘1–9 stay put.
         let present = Set(bySurface.keys)
         let prevSlots = slotOrder
         slotOrder.removeAll { !present.contains($0) }
@@ -689,23 +689,6 @@ final class Store: ObservableObject {
         selectedKey = order[i].key
         focus(order[i].current)
         return true
-    }
-
-    // Manual drag-to-reorder from the list. Reorders within the currently
-    // visible (filtered) rows, then splices back so any filtered-out rows keep
-    // their absolute slot. The new order sticks (reload() only ADDS new keys and
-    // drops gone ones — it never re-sorts) and is remembered across launches.
-    func moveSlots(fromOffsets source: IndexSet, toOffset destination: Int) {
-        let visibleKeys = visibleGroups.map(\.key)
-        var reordered = visibleKeys
-        reordered.move(fromOffsets: source, toOffset: destination)
-        let visibleSet = Set(visibleKeys)
-        var it = reordered.makeIterator()
-        slotOrder = slotOrder.map { visibleSet.contains($0) ? (it.next() ?? $0) : $0 }
-        persistSlotOrder()
-        // Reflect right away so the row doesn't snap back before the next reload.
-        let byKey = Dictionary(orderedGroups.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })
-        orderedGroups = slotOrder.compactMap { byKey[$0] }
     }
 
     // Locate joystick-focus.sh without assuming the dev's ~/joystick checkout:
@@ -1324,12 +1307,6 @@ struct GroupRow: View {
     var clearRow: (Op) -> Void = { _ in }
     let action: () -> Void
 
-    // Only mount the first-mouse overlay while the window is inactive (see the
-    // overlay below): it's a hosted NSView and its mere presence in a row breaks
-    // List's drag-to-reorder, so we keep it out of the view tree whenever the
-    // window is key/active — which is exactly when you'd be dragging.
-    @Environment(\.controlActiveState) private var activeState
-
     // Is this the Ghostty tab/split focused right now? Shell rows group BY
     // surface (group.key), so that's an exact hit. Claude rows group by
     // claude-<sid> and carry only a best-effort surface snapshot on current.surface
@@ -1424,10 +1401,8 @@ struct GroupRow: View {
         .contentShape(Rectangle())
         .onTapGesture { action() }
         // Let the click land on the FIRST press even when Joystick is in the
-        // background (see FirstMouseView). Only present while the window is
-        // inactive — when it's key/active the overlay is gone so List's
-        // drag-to-reorder works (the hosted NSView would otherwise block it).
-        .overlay { if activeState == .inactive { FirstMouseView(action: action) } }
+        // background (see FirstMouseView). Transparent while we're frontmost.
+        .overlay { FirstMouseView(action: action) }
         .help("Click to focus this tab in Ghostty · right-click to copy")
         .contextMenu {
             copyMenu(for: group.current)
@@ -1714,16 +1689,9 @@ struct ContentView: View {
                                 .font(.body)
                                 .foregroundStyle(.secondary)
                         } else {
-                            // Iterate visibleGroups DIRECTLY (not Array(.enumerated())):
-                            // SwiftUI only attaches the .onMove drag-reorder affordance
-                            // when ForEach is built over the collection itself. Wrapping it
-                            // in .enumerated() to get the ⌘N index silently killed dragging
-                            // (regressed in the jump-hint commit). Derive the index inside.
-                            ForEach(store.visibleGroups) { g in
-                                let idx = store.visibleGroups.firstIndex { $0.id == g.id } ?? 0
+                            ForEach(Array(store.visibleGroups.enumerated()), id: \.element.id) { idx, g in
                                 row(g, nowTs, index: idx)
                             }
-                            .onMove { src, dst in store.moveSlots(fromOffsets: src, toOffset: dst) }
                         }
                     }
                 } else {

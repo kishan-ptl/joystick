@@ -27,7 +27,7 @@ shared state and doubles as the future integration API.
   `build-app.sh` → `~/Applications/Joystick.app`. Owns both the menubar
   (`MenuBarExtra`) and the window. The window is **keyboard-first**: a global
   hotkey (`⌥⌘J`, Carbon `RegisterEventHotKey`) summons/toggles it, and ↑↓ / ⏎ /
-  ⌘1–9 / type-to-filter drive a stable, first-seen, drag-reorderable flat list
+  ⌘1–9 / type-to-filter drive a stable, first-seen flat list
   (newest on top, slot order persisted) — while the menubar popover keeps the
   prioritized waiting-on-top sort. The window's fixed order is deliberate, not a
   regression of the sort; see NOTES.md "Keyboard-first window (2026-06-14)".
