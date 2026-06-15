@@ -1808,11 +1808,15 @@ struct ContentView: View {
                 guard let w = event.window, w.title == "Joystick", w.canBecomeMain else { return false }
                 let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
                 switch Int(event.keyCode) {
+                // ⌘ test is `.contains`, NOT `== .command`: macOS reports arrow
+                // keys as function keys, so their flags ALWAYS carry .numericPad
+                // + .function — `flags == .command` is never true for ⌘↓/⌘↑ and
+                // the reorder silently degraded to a plain cursor move.
                 case 125:                                           // ↓  (⌘↓ reorders down)
-                    if flags == .command { store.moveSelectedRow(1) } else { store.moveSelection(1) }
+                    if flags.contains(.command) { store.moveSelectedRow(1) } else { store.moveSelection(1) }
                     return true
                 case 126:                                           // ↑  (⌘↑ reorders up)
-                    if flags == .command { store.moveSelectedRow(-1) } else { store.moveSelection(-1) }
+                    if flags.contains(.command) { store.moveSelectedRow(-1) } else { store.moveSelection(-1) }
                     return true
                 case 36, 76:                                        // ⏎ / enter
                     store.activateSelection()   // focus Ghostty; leave Joystick up
