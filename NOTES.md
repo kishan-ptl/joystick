@@ -65,9 +65,11 @@ popover) is now fully drivable without the mouse, Raycast-style:
 - **Fixed, first-seen, flat list** (no Running/Finished split in the window).
   Each terminal keeps its slot for life — state shows in the glyph, not the
   position — so ↑/↓ and ⌘1–9 are stable muscle memory. New terminals join at the
-  **TOP** (newest first); closed ones drop out. **Drag to reorder**; order
-  persists (UserDefaults `slotOrder`) and `reload()` never re-sorts, only
-  adds/drops. Cursor on summon **pre-selects** the first waiting row (then the
+  **TOP** (newest first); closed ones drop out. Order persists (UserDefaults
+  `slotOrder`) and `reload()` never re-sorts, only adds/drops. (Manual
+  **drag-to-reorder** was removed 2026-06-15 — it can't coexist with
+  click-to-focus or first-mouse; see below.) Cursor on summon **pre-selects**
+  the first waiting row (then the
   tab you're in, then top), so ⌥⌘J→⏎ still jumps to what needs you.
 - Single **`Window`** scene (not `WindowGroup`) so the hotkey can't spawn
   duplicate windows; explicit frame autosave so size/position survive hide +
@@ -86,6 +88,36 @@ Caveat to revisit before public/brew distribution: the `⌥⌘J` default collide
 with Chrome/Firefox's "JavaScript console" shortcut (a global hotkey wins
 system-wide). Fine personally; a **rebinding UI** (folds into the planned v0.2
 Settings) should land before shipping the cask.
+
+## Drag-to-reorder removed — can't coexist with click-to-focus + first-mouse (2026-06-15)
+
+The window's manual **drag-to-reorder** (`.onMove` → `Store.moveSlots`) had
+silently stopped working and was removed. It is NOT a small-fix regression — a
+focused live bisection (each step = one build, drag-tested by hand) proved drag
+can't coexist with the two click behaviors that ARE the feature:
+
+- **Bare-`Text` rows in the same `List` reorder fine** → the blocker is in the
+  row, not the list/container/macOS.
+- The row's **`.onTapGesture { focus }` starves the reorder drag**: it claims the
+  mouse-down so the press-drag never reaches the backing table view. It coexisted
+  with `.onMove` when the window shipped (70fb9a6), so macOS has since tightened
+  gesture arbitration — which is why drag "just stopped" with no change to that
+  line (matches "not sure what happened").
+- The per-row **`FirstMouseView` overlay** (first-click-from-background focus)
+  **also independently blocks the drag** — clean A/B: overlay out → drags,
+  overlay in → dead — even though its `hitTest` returns nil while the window is
+  key. A hosted NSView in the row's cell disrupts NSTableView reorder regardless.
+- Swapping `.onTapGesture` → `.simultaneousGesture(TapGesture())` lets the drag
+  through but makes **single-click focus unreliable** (only double-click fires).
+
+So drag needs BOTH the tap gesture and the overlay gone — i.e. it costs reliable
+single-click focus AND first-click-from-background, both core (one-tap focus is
+"THE feature, rock-solid"; first-mouse is "very important"). Not worth it. Kept:
+the stable first-seen persisted slot order, ⌘1–9, and keyboard nav. To ever
+revisit you'd need (both unverified): a **window-level** first-mouse (not a
+per-row NSView overlay) and a single-click focus path that isn't `.onTapGesture`
+(e.g. `List(selection:)` with a click-only binding kept separate from the
+keyboard cursor).
 
 ## Worktree chip on Claude rows (2026-06-14)
 
