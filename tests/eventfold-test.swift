@@ -61,6 +61,7 @@ struct EventFoldTests {
             f.apply(ev(#"{"kind":"claude","ev":"start","id":"claude-x","cmd":"» second","ts":110}"#))
             check("prior turn closed to history", f.done.count == 1 && f.done.last?.cmd == "» first")
             check("new turn is open", f.open["claude-x"]?.cmd == "» second" && f.open["claude-x"]?.isRunning == true)
+            check("plausible gap kept as synthetic dur", f.done.last?.dur == 10)
         }
 
         // 6. late-end supersede guard: an end whose turn (ts-dur) predates the open op's
@@ -126,23 +127,28 @@ struct EventFoldTests {
             check("5am is its own day", EventFold.fourAMDayStart(at(5, 15)) != EventFold.fourAMDayStart(at(3, 15)))
         }
 
-        // --- KNOWN landmines, pinned as characterization tests (to fix in a follow-up) ---
+        // --- the two former landmines, now fixed ---
 
-        // L1. Op.id has only second resolution: two ops sharing a key in the same integer
-        //     second collide (SwiftUI identity clash → row flicker). Documents current behavior.
-        do {
-            let a = Op(key: "k", cmd: "", cwd: "", tty: "", surface: "", kind: "shell", pid: 1, start: 100.2)
-            let b = Op(key: "k", cmd: "", cwd: "", tty: "", surface: "", kind: "shell", pid: 2, start: 100.8)
-            check("KNOWN: Op.id second-resolution collision", a.id == b.id)
-        }
-
-        // L2. The queued-prompt close synthesizes dur = ts − prevStart with no cap, so an
-        //     interrupted turn that sat for hours shows a huge fake "success". Documents it.
+        // L1. Op.id must be unique per op even when same-session turns share an integer
+        //     second (the log clock is whole seconds). Three same-second turns -> two
+        //     done + one open, all with distinct ids (SwiftUI identity, no row flicker).
         do {
             var f = EventFold()
             f.apply(ev(#"{"kind":"claude","ev":"start","id":"claude-x","cmd":"» a","ts":100}"#))
-            f.apply(ev(#"{"kind":"claude","ev":"start","id":"claude-x","cmd":"» b","ts":10000}"#))
-            check("KNOWN: uncapped synthetic dur on interrupted turn", f.done.last?.dur == 9900)
+            f.apply(ev(#"{"kind":"claude","ev":"start","id":"claude-x","cmd":"» b","ts":100}"#))  // closes a
+            f.apply(ev(#"{"kind":"claude","ev":"start","id":"claude-x","cmd":"» c","ts":100}"#))  // closes b
+            let ids = [f.done[0].id, f.done[1].id, f.open["claude-x"]!.id]
+            check("same-second turns get distinct ids", f.done.count == 2 && Set(ids).count == 3)
+        }
+
+        // L2. The queued-prompt close fabricates the prior turn's dur from the gap. A
+        //     plausible gap is kept (see test 5); an implausible one (interrupted turn that
+        //     sat for hours) is recorded as unknown, not a huge fake "success".
+        do {
+            var f = EventFold()
+            f.apply(ev(#"{"kind":"claude","ev":"start","id":"claude-x","cmd":"» a","ts":100}"#))
+            f.apply(ev(#"{"kind":"claude","ev":"start","id":"claude-x","cmd":"» b","ts":10000}"#))  // ~2.75h gap
+            check("implausible gap -> unknown dur, not fake success", f.done.last?.dur == nil)
         }
 
         print("pass=\(pass) fail=\(fail)")

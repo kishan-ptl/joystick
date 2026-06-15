@@ -53,6 +53,9 @@ struct Op: Identifiable {
     let kind: String       // "shell" | "claude" | "external"
     let pid: Int32
     let start: Double
+    let seq: Int           // unique creation order, assigned by EventFold. SwiftUI identity
+                           // only — disambiguates same-key ops that share an integer-second
+                           // start (the log clock is whole seconds, so start alone collides).
     var endTs: Double? = nil
     var exitCode: Int? = nil
     var dur: Double? = nil
@@ -72,7 +75,7 @@ struct Op: Identifiable {
     var agentColor = ""               // user-given session color name, from meta
     var worktree = ""                 // git worktree leaf (linked worktrees only), from meta
 
-    var id: String { "\(key)-\(Int(start))" }
+    var id: String { "\(key)#\(seq)" }
     var isRunning: Bool { endTs == nil }
     var isWaiting: Bool { isRunning && (waitingSince != nil || stallIdle != nil) }
     var isClaude: Bool { kind == "claude" }
@@ -107,8 +110,14 @@ struct EventFold {
     private(set) var open: [String: Op] = [:]    // id -> currently-open op
     private(set) var done: [Op] = []             // finished ops, oldest first (tail-capped)
     private(set) var meta: [String: SessionMeta] = [:]  // claude-<sid> -> session metadata
+    private var nextSeq = 0                              // monotonic id source for Op.seq
 
     static let maxDoneRetained = 2000   // incremental parse accumulates; cap retained finished ops
+    // A queued-prompt close (below) fabricates the prior turn's duration from the gap
+    // to the new turn's start — right for the common case (its end just hadn't folded
+    // yet), but an interrupted turn (Esc, no Stop) can sit open for hours. Beyond this
+    // gap, treat the duration as unknown rather than report a huge fake "success".
+    static let maxLateEndGapSecs = 2.0 * 3600
 
     // Fold one event into the running state.
     mutating func apply(_ e: RawEvent) {
@@ -128,14 +137,18 @@ struct EventFold {
             // than let the late end (dropped below) swallow this NEW turn's op and
             // freeze the new prompt as a finished row. See NOTES.md.
             if kind == "claude", var prev = open[e.id] {
+                let gap = e.ts - prev.start
                 prev.endTs = e.ts
-                prev.dur = max(0, e.ts - prev.start)
+                // Real duration only when the gap is plausible (the end was merely late);
+                // beyond that the prior turn was interrupted and sat open — duration unknown.
+                prev.dur = (gap >= 0 && gap <= Self.maxLateEndGapSecs) ? gap : nil
                 prev.exitCode = 0
                 done.append(prev)
             }
             open[e.id] = Op(key: e.id, cmd: e.cmd ?? "?", cwd: e.cwd ?? "",
                             tty: e.tty ?? "", surface: e.surface ?? "", kind: kind,
-                            pid: e.pid ?? -1, start: e.ts)
+                            pid: e.pid ?? -1, start: e.ts, seq: nextSeq)
+            nextSeq += 1
         case "end":
             guard var op = open[e.id] else { break }
             // Drop a stale end whose turn the open op has already superseded. An end
@@ -205,7 +218,7 @@ struct EventFold {
     // Forget everything — used on rotation/truncation and on the 4am day rollover,
     // both of which force a full re-read from the top of the log.
     mutating func reset() {
-        open = [:]; done = []; meta = [:]
+        open = [:]; done = []; meta = [:]; nextSeq = 0
     }
 
     // MARK: Tally helpers (pure; Store owns the @Published counter + persistence)
