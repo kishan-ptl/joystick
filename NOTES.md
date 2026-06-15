@@ -214,6 +214,39 @@ hot path for marginal precision. Net perf is neutral-to-faster: removes a
 per-Task log write, adds only a cheap string check in the once-per-turn
 UserPromptSubmit path.
 
+## Cleared-session orphan row — /clear rotates the session id (2026-06-15)
+
+Symptom: after `/clear`, the terminal's row keeps showing the PREVIOUS prompt (a
+stale finished turn) while the new turn shows up as a *second* row — one terminal,
+two Claude rows — and the stale one never clears on its own.
+
+Root cause: `/clear` (and `/resume`, `/compact`, or exiting+restarting `claude`
+in a tab) spins up a NEW Claude Code `session_id` on the same surface and pid.
+Claude rows group by `claude-<sid>` (deliberately — surface capture is best-
+effort), so the cleared conversation becomes an orphaned group keyed by the dead
+sid. It lingers because (a) finished rows show while their surface exists, and the
+surface now hosts the new session, and (b) the only liveness reaper is `pruneOpen`
+by pid — but that pid is the still-alive claude process now SHARED with the new
+session, so even a dangling *running* orphan would never expire. Confirmed in the
+live log: id flipped `claude-695bc69b…` → `claude-4a177f17…`, same surface
+`124B6EC8`, same pid `37850`; the pre-clear turn had finished normally (a stray
+idle `waiting` afterward was a no-op — the op had already left `open`).
+
+Fix (viewer fold, `EventFold.apply`, sibling to the queued-prompt guard): a
+Ghostty surface hosts exactly one live claude process, so when a NEW claude
+`start` arrives on a surface (or pid) an earlier session held, that earlier
+session is gone — retire its ops from both `open` and `done`. Match on surface
+(the terminal) OR pid (the process), whichever the new start carries; never the
+same id (that's the queued-prompt case above). Surface is the normal match; pid
+is the fallback when capture missed and is itself airtight (live processes don't
+share pids). Emitter untouched, log stays the only shared state. Covered by
+eventfold tests 13/13b.
+
+Scope note: this also tidies a plain exit-then-restart of `claude` in one tab (the
+old finished turn retires when the new session takes the surface) — correct per
+the mirror principle (the row reflects what the terminal is doing now). It does
+NOT touch the claude→shell-command-in-the-same-tab case (different group keys).
+
 ## Roadmap
 
 ### v0.1 — shareable (1–2 weekends)
