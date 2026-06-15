@@ -127,6 +127,35 @@ struct EventFoldTests {
             check("5am is its own day", EventFold.fourAMDayStart(at(5, 15)) != EventFold.fourAMDayStart(at(3, 15)))
         }
 
+        // 13. session-id rotation (/clear, /resume, restart): a NEW claude-<sid> on
+        //     the SAME surface (or pid) retires the prior session's ops — open and
+        //     finished alike — so one terminal shows one Claude row, not a stale
+        //     duplicate. A bystander session in another tab (different surface + pid)
+        //     is untouched.
+        do {
+            var f = EventFold()
+            // Old session: a finished turn on surface S, pid 42.
+            f.apply(ev(#"{"kind":"claude","ev":"start","id":"claude-old","cmd":"» how important is 1?","surface":"S","pid":42,"ts":100}"#))
+            f.apply(ev(#"{"ev":"end","id":"claude-old","exit":0,"dur":5,"ts":105,"msg":"bye"}"#))
+            // A bystander session in another tab (surface T, pid 99) must survive.
+            f.apply(ev(#"{"kind":"claude","ev":"start","id":"claude-other","cmd":"» elsewhere","surface":"T","pid":99,"ts":106}"#))
+            // /clear rotates the id; the new session reuses surface S (and pid 42).
+            f.apply(ev(#"{"kind":"claude","ev":"start","id":"claude-new","cmd":"» okay next","surface":"S","pid":42,"ts":200}"#))
+            check("rotated session's finished row retired", !f.done.contains { $0.key == "claude-old" })
+            check("new session is the open op", f.open["claude-new"]?.isRunning == true)
+            check("bystander in another tab survives", f.open["claude-other"]?.isRunning == true)
+        }
+
+        // 13b. surface capture can miss (empty surface) — pid then carries the match,
+        //      and a still-OPEN prior turn (cleared mid-run) is dropped, not kept.
+        do {
+            var f = EventFold()
+            f.apply(ev(#"{"kind":"claude","ev":"start","id":"claude-old","cmd":"» a","surface":"","pid":42,"ts":100}"#))
+            f.apply(ev(#"{"kind":"claude","ev":"start","id":"claude-new","cmd":"» b","surface":"","pid":42,"ts":200}"#))
+            check("pid match retires prior session when surface unknown",
+                  f.open["claude-old"] == nil && f.open["claude-new"]?.isRunning == true && f.done.isEmpty)
+        }
+
         // --- the two former landmines, now fixed ---
 
         // L1. Op.id must be unique per op even when same-session turns share an integer

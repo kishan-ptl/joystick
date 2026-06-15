@@ -127,6 +127,26 @@ struct EventFold {
             // events written before the kind field existed.
             let kind = e.kind ?? (e.tty == "claude" ? "claude"
                                   : e.tty == "cli" ? "external" : "shell")
+            // Session-id rotation: /clear, /resume and /compact each spin up a NEW
+            // claude-<sid> (so does exiting and restarting `claude` in a tab), and
+            // Claude rows group by that id — so the cleared conversation would
+            // otherwise linger as a stale DUPLICATE row for the same terminal,
+            // un-reapable because its pid is the still-alive claude process shared
+            // with the new session. A Ghostty surface hosts exactly one live claude
+            // process, so when a NEW claude session starts on a surface (or pid) an
+            // earlier one held, that earlier session is gone: retire its ops (open
+            // and recent history alike). Match on surface (the terminal) or pid (the
+            // process), whichever the new start carries — never the same id, which is
+            // the queued-prompt case handled just below. See NOTES.md.
+            if kind == "claude" {
+                let surface = e.surface ?? "", pid = e.pid ?? -1
+                func superseded(_ op: Op) -> Bool {
+                    op.isClaude && op.key != e.id
+                        && ((!surface.isEmpty && op.surface == surface) || (pid > 0 && op.pid == pid))
+                }
+                open = open.filter { !superseded($0.value) }
+                done.removeAll(where: superseded)
+            }
             // Out-of-order guard (Claude turns share one id across turns): a queued
             // or auto-injected prompt's `start` can land in the log just BEFORE the
             // prior turn's `end`. The Stop handler is slow — it reads the transcript
