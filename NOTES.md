@@ -110,6 +110,21 @@ left of the rename pill / topic.
 - **Scope:** Claude rows only (`wt` only flows through `meta`). Shell rows
   already show their `cwd` and aren't the parallel-session pain point.
 
+## Mark unread (2026-06-14)
+
+Right-click a finished row → "Mark unread" brings back its blue unseen dot (and
+the dock tally). NOT inbox management — it's the inverse of a dismiss: you're
+flagging a result to revisit, not clearing it (principle #1 stays intact; no
+dismiss/clear, rows still vanish only when their tab closes).
+
+Implementation reuses the existing surface-based seen model instead of adding
+state: `markUnread` rewinds `seenAt[surface]` to just before the op ended, so
+`unseen = seenAt < endTs` flips true. It clears the organic way — focusing that
+Ghostty tab stamps `seenAt = now` again. The menu item only shows for a finished,
+surfaced, currently-seen row (running/external/already-unseen have nothing to do).
+Edge: marking unread the tab you're *currently* focused in Ghostty re-clears on
+the next focus poll — correct, you're looking at it.
+
 ## Roadmap
 
 ### v0.1 — shareable (1–2 weekends)

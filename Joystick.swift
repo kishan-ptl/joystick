@@ -623,6 +623,20 @@ final class Store: ObservableObject {
         try? p.run()
     }
 
+    // Manually re-flag a finished row as unread (right-click → "Mark unread").
+    // Reuses the surface-based seen model rather than adding new state: rewind
+    // seenAt for this op's surface to just before it ended, so the blue unseen
+    // dot and the dock tally come back. It then clears the organic way — the next
+    // time that Ghostty tab is focused, pollFocusedSurface stamps seenAt = now —
+    // exactly like a naturally-unseen result. No-op for running / external /
+    // surfaceless ops (nothing to rewind to).
+    func markUnread(_ op: Op) {
+        guard !op.surface.isEmpty, let end = op.endTs else { return }
+        seenAt[op.surface] = end - 1
+        persistSeen()
+        reload()
+    }
+
     // MARK: - Keyboard navigation
 
     // Does this group match the current type-to-filter query? (Empty query = all.)
@@ -1383,6 +1397,7 @@ struct GroupRow: View {
     var isSelected: Bool = false   // under the keyboard cursor (window nav only)
     var keyboardNav: Bool = false  // window list — shows the ⌘N jump hint
     var jumpNumber: Int? = nil     // this row's ⌘N number (1–9), if in range
+    var markUnread: (Op) -> Void = { _ in }
     let action: () -> Void
 
     // Is this the Ghostty tab/split focused right now? Shell rows group BY
@@ -1456,7 +1471,15 @@ struct GroupRow: View {
         // background (see FirstMouseView). Transparent while we're frontmost.
         .overlay { FirstMouseView(action: action) }
         .help("Click to focus this tab in Ghostty · right-click to copy")
-        .contextMenu { copyMenu(for: group.current) }
+        .contextMenu {
+            copyMenu(for: group.current)
+            if canMarkUnread(group.current) {
+                Divider()
+                Button { markUnread(group.current) } label: {
+                    Label("Mark unread", systemImage: "circle.fill")
+                }
+            }
+        }
         // The keyboard cursor is an accent-tinted FILL across the whole row, not
         // a leading bar — a leading bar sat right on top of the blue unseen-
         // result dot (both at the row's leading edge, both blue) and read as one
@@ -1479,6 +1502,13 @@ struct GroupRow: View {
         if !op.cwd.isEmpty {
             Button { copyToPasteboard(op.cwd) } label: { Label("Copy directory", systemImage: "folder") }
         }
+    }
+
+    // Only a finished, surfaced result that's currently SEEN can be marked unread.
+    // Running rows have no unread concept; external rows have no surface; an
+    // already-unseen row has nothing to do (the dot is already showing).
+    private func canMarkUnread(_ op: Op) -> Bool {
+        !op.isRunning && !op.isExternal && !op.surface.isEmpty && !op.unseen
     }
 
     private func historyLine(_ op: Op) -> String {
@@ -1757,7 +1787,8 @@ struct ContentView: View {
                  focusedSurface: store.focusedSurface,
                  isSelected: keyboardNav && g.key == store.selectedKey,
                  keyboardNav: keyboardNav,
-                 jumpNumber: (keyboardNav && index < 9) ? index + 1 : nil) {
+                 jumpNumber: (keyboardNav && index < 9) ? index + 1 : nil,
+                 markUnread: { store.markUnread($0) }) {
             store.selectedKey = g.key   // a mouse click also moves the cursor
             store.focus(g.current)
         }
