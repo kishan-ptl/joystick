@@ -21,7 +21,9 @@ shared state and doubles as the future integration API.
   one source of truth. Events: `start` / `end` / `waiting` / `active` / `meta`.
   Fields: id, cmd, cwd, pid, tty, surface, ts, exit, dur, msg (+ `meta` carries
   title, model, mode, ctx). `chmod 600`.
-- **Viewer** — `Joystick.app` (SwiftUI), source `Joystick.swift`, built by
+- **Viewer** — `Joystick.app` (SwiftUI), source `Joystick.swift` + `EventLog.swift`
+  (the latter is the Foundation-only event model + the pure `EventFold` left-fold of
+  the log, kept separate so it unit-tests without SwiftUI), built by
   `build-app.sh` → `~/Applications/Joystick.app`. Owns both the menubar
   (`MenuBarExtra`) and the window. The window is **keyboard-first**: a global
   hotkey (`⌥⌘J`, Carbon `RegisterEventHotKey`) summons/toggles it, and ↑↓ / ⏎ /
@@ -75,6 +77,8 @@ These were decided by using the tool; they define what it is.
 - **After editing `joystick-redact.zsh`:** run `zsh tests/redact-test.zsh`
   (must stay green) — it's load-bearing.
 - **After editing `Joystick.swift`:** rebuild + restart (above) to see changes.
+- **After editing `EventLog.swift`:** run `zsh tests/eventfold-test.sh` (must stay
+  green — it's the only Swift unit test), then rebuild + restart.
 - **zsh gotcha:** redaction uses `emulate -LR zsh` — the **R** matters. Plain `-L`
   does NOT reset an already-set `bash_rematch`/`glob_subst`, which silently breaks
   both `$MATCH` masking and the literal token elision. Keep the R.

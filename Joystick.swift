@@ -9,91 +9,11 @@ import Combine
 import Darwin
 import Carbon   // RegisterEventHotKey — global summon shortcut, no a11y prompt
 
-// MARK: - Events & operations
-
-struct RawEvent: Decodable {
-    let v: Int?            // schema version (1); absent on pre-versioning events
-    let kind: String?      // "shell" | "claude" | "external"; absent on legacy events (derive from tty)
-    let ev: String
-    let id: String
-    let cmd: String?
-    let cwd: String?
-    let pid: Int32?
-    let tty: String?
-    let surface: String?
-    let ts: Double
-    let exit: Int?
-    let dur: Double?
-    let msg: String?
-    let act: String?       // current activity (tool the agent just used), on `active` events
-    let sub: String?       // subagent key (Task tool_use_id), on `active` events that track a live Task
-    let subdone: Bool?     // true on the `active` event that ENDS a tracked subagent
-    let title: String?     // session topic (ai-title), on `meta` events
-    let model: String?     // model id, on `meta` events
-    let mode: String?      // permission mode, on `meta` events
-    let ctx: Double?       // context-window tokens used, on `meta` events
-    let name: String?      // user-set session title (rename), on `meta` events
-    let color: String?     // user-set session color (agent color), on `meta` events
-    let wt: String?        // git worktree leaf the session runs in (linked worktrees only), on `meta` events
-}
-
-// A subagent (Task) running inside a Claude turn. Keyed by the Task's tool_use_id
-// so its start (PreToolUse) and finish (PostToolUse) line up — concurrent
-// subagents each get their own live line instead of fighting over one activity.
-struct LiveChild: Identifiable { let id: String; let label: String }
-
-struct Op: Identifiable {
-    let key: String
-    let cmd: String
-    let cwd: String
-    let tty: String        // real device for shell ops; "" for claude/external
-    let surface: String
-    let kind: String       // "shell" | "claude" | "external"
-    let pid: Int32
-    let start: Double
-    var endTs: Double? = nil
-    var exitCode: Int? = nil
-    var dur: Double? = nil
-    var waitingSince: Double? = nil   // explicit waiting event (Claude hooks)
-    var waitingMsg: String? = nil
-    var activity: String? = nil       // live: tool the agent is currently using (Claude)
-    var liveSubagents: [LiveChild] = []  // live: subagents (Task) running this turn, in start order
-    var stallIdle: Double? = nil      // heuristic: tty quiet + fg proc asleep
-    var isService = false             // fg process group holds a listening port
-    var unseen = false                // finished, and surface not viewed since
-    var summary: String? = nil        // Claude's closing blurb, on the end event
-    var title = ""                    // session topic (from meta events), Claude rows
-    var model = ""                    // model id (from meta events)
-    var mode = ""                     // permission mode (from meta events)
-    var ctxTokens: Double = 0         // context-window fill (from meta events)
-    var sessionName = ""              // user-given session title (rename), from meta
-    var agentColor = ""               // user-given session color name, from meta
-    var worktree = ""                 // git worktree leaf (linked worktrees only), from meta
-
-    var id: String { "\(key)-\(Int(start))" }
-    var isRunning: Bool { endTs == nil }
-    var isWaiting: Bool { isRunning && (waitingSince != nil || stallIdle != nil) }
-    var isClaude: Bool { kind == "claude" }
-    var isExternal: Bool { kind == "external" }   // `joystick log` (CI/webhooks); no local pid or surface
-
-    // Stable grouping identity. A Claude session keeps ONE id across all its
-    // turns (claude-<sid>), so group by that — robust even when surface
-    // capture misses. Shell commands have per-command ids, so they group by
-    // their Ghostty surface (the terminal they ran in).
-    var groupKey: String { isClaude ? key : (surface.isEmpty ? id : surface) }
-}
-
-// One row per Ghostty surface: what the terminal is doing now (or did last),
-// with a short dimmed history of earlier results beneath it.
-struct SurfaceGroup: Identifiable {
-    let key: String      // surface id (op id when surface unknown)
-    var current: Op
-    var history: [Op] = []
-    var id: String { key }
-}
-
-// Per-session metadata from the transcript (`meta` events), keyed by claude-<sid>.
-struct SessionMeta { var title = ""; var model = ""; var mode = ""; var ctx: Double = 0; var name = ""; var color = ""; var wt = "" }
+// MARK: - App-only types
+//
+// The log event model, the folded `Op`/`SurfaceGroup`/`SessionMeta`, and the pure
+// `EventFold` (the left-fold of the log) live in EventLog.swift — Foundation-only,
+// so they compile and unit-test without SwiftUI. See tests/eventfold-test.swift.
 
 // Outcome of running the in-app setup (install.sh).
 enum SetupResult: Equatable { case ok, failed(String) }
@@ -148,7 +68,6 @@ final class Store: ObservableObject {
     static let doneWindowSecs = 6.0 * 3600
     static let externalTTL = 24.0 * 3600   // running `joystick log` ops dropped after this with no end
     static let maxDone = 20
-    static let maxDoneRetained = 2000   // incremental parse accumulates; cap retained finished ops
     static let historyCap = 3
     static let ignore: Set<String> = ["claude", "claude2", "vim", "nvim", "less", "man", "top", "htop", "tmux"]
     nonisolated static let stallSecs = 20.0
@@ -168,9 +87,7 @@ final class Store: ObservableObject {
     private var lastLogMtime = Date.distantPast
     private var lastLogSize: UInt64 = .max
     private var lastReadOffset: UInt64 = 0   // bytes of the log already folded in
-    private var parsedOpen: [String: Op] = [:]
-    private var parsedDone: [Op] = []
-    private var parsedMeta: [String: SessionMeta] = [:]
+    private var fold = EventFold()            // pure left-fold of the log → open/done/meta
     private var lastPersistedFocus: String? = nil
     private var liveSurfaces: Set<String>? = nil
     private var lastSurfacePoll = Date.distantPast
@@ -417,17 +334,17 @@ final class Store: ObservableObject {
 
         // Free open ops whose host is gone (closed tab / quit session / expired
         // external). The running filter would hide them anyway; pruning here is what
-        // stops parsedOpen growing unbounded between rotations, and keeps a stale id
-        // from mis-feeding the Claude late-end merge in applyEvent.
-        parsedOpen = parsedOpen.filter { opHostAlive($0.value, nowTs: nowTs) }
+        // stops fold.open growing unbounded between rotations, and keeps a stale id
+        // from mis-feeding the Claude late-end merge in EventFold.apply.
+        fold.pruneOpen { opHostAlive($0, nowTs: nowTs) }
 
-        // parsedOpen now holds only live-host ops, so this is just the cosmetic gate:
+        // fold.open now holds only live-host ops, so this is just the cosmetic gate:
         // hide ignored interactive apps, and debounce trivial shell noise (a
         // blink-and-gone `ls`/`cd` never flashes a row). External + Claude rows are
         // each a deliberate event — show them the instant they start, so a turn that
         // finishes in <minRunningSecs doesn't fall into the dead zone between "too
         // young to show running" and "too short to show done".
-        var running = parsedOpen.values
+        var running = fold.open.values
             .filter { op in
                 guard !ignored(op.cmd) else { return false }
                 return op.isExternal || op.isClaude || nowTs - op.start >= Self.minRunningSecs
@@ -473,7 +390,7 @@ final class Store: ObservableObject {
         // regardless of duration, so a quick turn doesn't vanish into the gap
         // between "too young to show running" and "too short to show done".
         var finished = Array(
-            parsedDone.filter { ($0.isExternal || $0.isClaude || ($0.dur ?? 0) >= Self.minDoneSecs)
+            fold.done.filter { ($0.isExternal || $0.isClaude || ($0.dur ?? 0) >= Self.minDoneSecs)
                 && nowTs - ($0.endTs ?? 0) <= Self.doneWindowSecs
                 && !ignored($0.cmd) }
                 .sorted { ($0.endTs ?? 0) > ($1.endTs ?? 0) }
@@ -557,7 +474,7 @@ final class Store: ObservableObject {
         // Attach per-session meta (title/model/mode/ctx from `meta` events) to
         // each Claude group's current op for display.
         func withMeta(_ g: SurfaceGroup) -> SurfaceGroup {
-            guard let m = parsedMeta[g.key] else { return g }
+            guard let m = fold.meta[g.key] else { return g }
             var g = g
             g.current.title = m.title; g.current.model = m.model
             g.current.mode = m.mode; g.current.ctxTokens = m.ctx
@@ -593,7 +510,7 @@ final class Store: ObservableObject {
         // whose pid died without an `end`. With no live open op there's nothing
         // to animate, so the tick is torn down and the app idles silently; the
         // FS watch alone wakes it when the next event lands.
-        let liveOpen = parsedOpen.values.contains { opHostAlive($0, nowTs: nowTs) }
+        let liveOpen = fold.open.values.contains { opHostAlive($0, nowTs: nowTs) }
         updateActiveTick(liveOpen)
     }
 
@@ -806,7 +723,7 @@ final class Store: ObservableObject {
     }()
 
     // Incremental tail-parse: read only the bytes appended since last time and
-    // fold each new event into parsedOpen/parsedDone. The log is append-only, so
+    // fold each new event into fold.open/fold.done. The log is append-only, so
     // steady-state cost is "parse the new line(s)", not "re-read 4000 lines" —
     // and because we accumulate rather than re-window, a long-running op's row no
     // longer vanishes when its `start` scrolls past the last-4000-line mark (now
@@ -820,10 +737,10 @@ final class Store: ObservableObject {
         lastLogSize = size
 
         // Rotation/truncation (the log shrank or was replaced): re-read from top.
-        if size < lastReadOffset { lastReadOffset = 0; parsedOpen = [:]; parsedDone = []; parsedMeta = [:] }
+        if size < lastReadOffset { lastReadOffset = 0; fold.reset() }
 
         guard let fh = try? FileHandle(forReadingFrom: logURL) else {
-            lastReadOffset = 0; parsedOpen = [:]; parsedDone = []; parsedMeta = [:]
+            lastReadOffset = 0; fold.reset()
             return
         }
         defer { try? fh.close() }
@@ -851,131 +768,33 @@ final class Store: ObservableObject {
         let beforeCount = commandsToday
         for (i, line) in allLines.enumerated() {
             guard let e = try? decoder.decode(RawEvent.self, from: Data(line)) else { continue }
-            if countToday, e.ev == "start", e.ts >= tallyDayStart, countsTowardTally(e) { commandsToday += 1 }
-            if i >= foldStart { applyEvent(e) }
+            if countToday, e.ev == "start", e.ts >= tallyDayStart, EventFold.countsTowardTally(e) { commandsToday += 1 }
+            if i >= foldStart { fold.apply(e) }
         }
         needsBackfill = false
         if commandsToday != beforeCount { persistTally() }
-        if parsedDone.count > Self.maxDoneRetained {
-            parsedDone.removeFirst(parsedDone.count - Self.maxDoneRetained)
-        }
-    }
-
-    // The 4am boundary (local time) of the "day" containing `date`. A day begins
-    // at 4am, not midnight, so a late-night session counts under the day you
-    // started it; before 4am, the current day began at yesterday's 4am.
-    private func fourAMDayStart(_ date: Date) -> TimeInterval {
-        let cal = Calendar.current
-        let today4 = cal.date(bySettingHour: 4, minute: 0, second: 0, of: date) ?? date
-        let start = today4 <= date ? today4
-                  : (cal.date(byAdding: .day, value: -1, to: today4) ?? today4)
-        return start.timeIntervalSince1970
+        fold.trimDone()
     }
 
     // If the 4am day boundary has moved since the tally was last anchored, reset
     // and force a cold re-read so the new day's count is backfilled from the log.
-    // Clearing parsedOpen/parsedDone would otherwise blank every row until the
+    // Clearing the fold would otherwise blank every row until the
     // next log event, because parseLogIfChanged's mtime/size gate skips an
     // unchanged file — so we also invalidate that cache to guarantee the re-read.
     private func rolloverTallyIfNeeded() {
-        let dayStart = fourAMDayStart(now)
+        let dayStart = EventFold.fourAMDayStart(now)
         guard dayStart != tallyDayStart else { return }
         tallyDayStart = dayStart
         commandsToday = 0
         needsBackfill = true
-        lastReadOffset = 0; parsedOpen = [:]; parsedDone = []; parsedMeta = [:]
+        lastReadOffset = 0; fold.reset()
         lastLogMtime = .distantPast; lastLogSize = .max   // force parseLogIfChanged to re-read
         persistTally()
-    }
-
-    // Shell commands + Claude turns count toward the daily tally; external
-    // `joystick log` events don't (they aren't commands you ran).
-    private func countsTowardTally(_ e: RawEvent) -> Bool {
-        let kind = e.kind ?? (e.tty == "claude" ? "claude" : e.tty == "cli" ? "external" : "shell")
-        return kind == "shell" || kind == "claude"
     }
 
     private func persistTally() {
         UserDefaults.standard.set(commandsToday, forKey: "commandsToday")
         UserDefaults.standard.set(tallyDayStart, forKey: "tallyDayStart")
-    }
-
-    // Fold one event into the running state. Identical semantics whether applied
-    // incrementally or over a full re-read — it's a left-fold over the log.
-    private func applyEvent(_ e: RawEvent) {
-        switch e.ev {
-        case "start":
-            // Prefer the explicit kind; fall back to the old tty sentinels for
-            // events written before the kind field existed.
-            let kind = e.kind ?? (e.tty == "claude" ? "claude"
-                                  : e.tty == "cli" ? "external" : "shell")
-            // Out-of-order guard (Claude turns share one id across turns): a queued
-            // or auto-injected prompt's `start` can land in the log just BEFORE the
-            // prior turn's `end`. The Stop handler is slow — it reads the transcript
-            // for the closing blurb — while UserPromptSubmit, with surface+pid
-            // cached, is fast, so the new start overtakes the pending end. If we
-            // still hold an open op for this id, the prior turn ended but its end
-            // hasn't folded yet: close it out now so it survives as history, rather
-            // than let the late end (dropped below) swallow this NEW turn's op and
-            // freeze the new prompt as a finished row. See NOTES.md.
-            if kind == "claude", var prev = parsedOpen[e.id] {
-                prev.endTs = e.ts
-                prev.dur = max(0, e.ts - prev.start)
-                prev.exitCode = 0
-                parsedDone.append(prev)
-            }
-            parsedOpen[e.id] = Op(key: e.id, cmd: e.cmd ?? "?", cwd: e.cwd ?? "",
-                                  tty: e.tty ?? "", surface: e.surface ?? "", kind: kind,
-                                  pid: e.pid ?? -1, start: e.ts)
-        case "end":
-            guard var op = parsedOpen[e.id] else { break }
-            // Drop a stale end whose turn the open op has already superseded. An end
-            // closes the turn that began at (ts − dur); the emitter derives both
-            // from the same integer-second clock, so for the matching turn that
-            // equals op.start exactly. A strictly-later open op is a newer turn (the
-            // queued-prompt race above) — leave it live, don't close it.
-            if op.isClaude, let dur = e.dur, op.start > e.ts - dur { break }
-            parsedOpen.removeValue(forKey: e.id)
-            op.endTs = e.ts
-            op.exitCode = e.exit ?? 0
-            op.dur = e.dur ?? max(0, e.ts - op.start)
-            op.summary = e.msg        // Claude's closing blurb (claude turns only)
-            parsedDone.append(op)
-        case "waiting":
-            if var op = parsedOpen[e.id] {
-                op.waitingSince = e.ts
-                op.waitingMsg = e.msg
-                op.activity = nil          // blocked on you, not running a tool
-                parsedOpen[e.id] = op
-            }
-        case "active":
-            if var op = parsedOpen[e.id] {
-                op.waitingSince = nil
-                op.waitingMsg = nil
-                if let sub = e.sub, !sub.isEmpty {
-                    // A tracked subagent (Task): add on start, drop on finish, so
-                    // concurrent subagents each get their own live line under the
-                    // session row instead of overwriting one latest-wins activity.
-                    op.liveSubagents.removeAll { $0.id == sub }
-                    if e.subdone != true {
-                        op.liveSubagents.append(LiveChild(id: sub, label: e.act ?? "Task"))
-                    }
-                } else {
-                    op.activity = e.act    // live "what it's doing now" (non-Task tools)
-                }
-                parsedOpen[e.id] = op
-            }
-        case "meta":
-            // Session metadata (title/model/mode/ctx). Keyed by claude-<sid>;
-            // attached to the group's current op at render time. Emitted AFTER
-            // the end event, so the op is already in `done` — keep it separate.
-            parsedMeta[e.id] = SessionMeta(title: e.title ?? "", model: e.model ?? "",
-                                           mode: e.mode ?? "", ctx: e.ctx ?? 0,
-                                           name: e.name ?? "", color: e.color ?? "",
-                                           wt: e.wt ?? "")
-        default:
-            break
-        }
     }
 
     private func refreshTtyStates(ttys: Set<String>, nowTs: Double) {
@@ -1005,7 +824,7 @@ final class Store: ObservableObject {
     // Is an open op's host still around? A shell/Claude op lives while its process
     // does (tab open / session running); an external `joystick log` op (no local
     // pid) lives until its TTL elapses. Single source of truth: the running-view
-    // filter, the active-tick liveOpen check, and parsedOpen pruning all gate on
+    // filter, the active-tick liveOpen check, and fold pruning all gate on
     // this, so "hidden from the view" and "freed from memory" can't drift apart.
     private func opHostAlive(_ op: Op, nowTs: Double) -> Bool {
         op.isExternal ? (nowTs - op.start < Self.externalTTL) : alive(op.pid)

@@ -15,6 +15,6 @@ cp "$DIR/Joystick-Info.plist" "$APP/Contents/Info.plist"
 cp "$DIR"/install.sh "$DIR"/joystick.zsh "$DIR"/claude-hook.sh \
    "$DIR"/joystick-redact.zsh "$DIR"/joystick-focus.sh "$APP/Contents/Resources/"
 chmod +x "$APP/Contents/Resources/"*.sh
-swiftc -O -swift-version 5 -parse-as-library "$DIR/Joystick.swift" -o "$APP/Contents/MacOS/Joystick"
+swiftc -O -swift-version 5 -parse-as-library "$DIR/EventLog.swift" "$DIR/Joystick.swift" -o "$APP/Contents/MacOS/Joystick"
 codesign -s - --force "$APP"
 echo "Built $APP"
