@@ -217,6 +217,7 @@ case $event in
       *"waiting for your input"*) msg="waiting on your reply" ;;
       *) msg=${msg#Claude } ;;
     esac
+    _joystick_redact "$msg"; msg=${REPLY[1,240]}   # a tool invocation can carry secrets
     jq -cn --arg id "$id" --arg msg "$msg" --argjson ts "$now" \
       '{v:1,ev:"waiting",id:$id,msg:$msg,ts:$ts}' >> "$LOG"
     : > "${LOG:h}/waiting-$sid"

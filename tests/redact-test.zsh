@@ -1,6 +1,6 @@
 #!/bin/zsh
 # joystick redaction test suite — run after any change to joystick-redact.zsh
-source ~/joystick/joystick-redact.zsh
+source ${0:A:h}/../joystick-redact.zsh   # the redactor beside this test (worktree-aware)
 pass=0; fail=0
 check() { # $1 input, $2 must-contain, $3 must-not-contain
   _joystick_redact "$1"
@@ -22,6 +22,10 @@ check 'echo ghp_AbCdEfGhIjKlMnOpQrStUvWxYz123456' 'ghp_…' 'AbCdEfGhIjKl'
 check 'verify eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.dBjftJeZ4CVPmB92K27uhb' 'eyJh…' 'dBjftJeZ'
 check 'use Xy9Zw8Vu7Tt6Ss5Rr4Qq3Pp2Oo1Nn0Mm now' 'Xy9Z…' 'Zw8Vu7Tt6'
 check 'git checkout 3048da2bcf8e8a1c2d3e4f5a6b7c8d9e0f1a2b3c' '3048…' 'da2bcf8e8a1c'
+# Quoting/brackets must not let a long token escape elision (the (q)-flag bug).
+check 'echo "AbCdEfGhIjKlMnOpQrStUvWxYz123456"' '…' 'EfGhIjKlMn'
+check "curl --data 'AbCdEfGhIjKlMnOpQrStUvWxYz123456'" '…' 'EfGhIjKlMn'
+check 'auth token[AbCdEfGhIjKlMnOpQrStUvWxYz123456]' '…' 'EfGhIjKlMn'
 # Must NOT touch
 check 'eas build --platform ios --profile production' 'eas build --platform ios --profile production' '…'
 check 'git commit -m "fix token parsing in auth module"' 'fix token parsing in auth module' '•••'
@@ -30,4 +34,12 @@ check 'vim apps/mobile/components/popovers/popover-layout.tsx' 'apps/mobile/comp
 check 'npm install @tanstack/react-query-devtools' '@tanstack/react-query-devtools' '…'
 check 'curl https://api.example.com/v1/items?limit=100&cursor=abc' 'https://api.example.com' '…'
 check 'docker pull ghcr.io/fndrhouse/oasis-api:latest' 'ghcr.io/fndrhouse/oasis-api:latest' '…'
+# A user's bash_rematch must not defeat masking — emulate -LR resets it. (If this
+# regresses to plain -L the redactor also runaway-doubles the string, so a failure
+# here may be slow: that slowness IS the signal.)
+( setopt bash_rematch; _joystick_redact 'PGPASSWORD=hunter2 psql'
+  [[ $REPLY == *'PGPASSWORD=•••'* && $REPLY != *hunter2* ]] )
+if (( $? )); then ((fail++)); print "FAIL: bash_rematch defeats masking"; else ((pass++)); fi
+
 print "pass=$pass fail=$fail"
+[[ $fail -eq 0 ]]

@@ -75,8 +75,9 @@ These were decided by using the tool; they define what it is.
 - **After editing `joystick-redact.zsh`:** run `zsh tests/redact-test.zsh`
   (must stay green) — it's load-bearing.
 - **After editing `Joystick.swift`:** rebuild + restart (above) to see changes.
-- **zsh gotcha:** redaction uses `emulate -L zsh` so user shell options
-  (bash_rematch) can't silently break the `$MATCH` vars. Keep it.
+- **zsh gotcha:** redaction uses `emulate -LR zsh` — the **R** matters. Plain `-L`
+  does NOT reset an already-set `bash_rematch`/`glob_subst`, which silently breaks
+  both `$MATCH` masking and the literal token elision. Keep the R.
 - **Log lines must stay < ~4096 bytes (PIPE_BUF)** so concurrent `>>` appends
   from many shells/hooks stay atomic. That's why `cmd` is capped at 300 and
   prompts at 120 — do NOT raise those caps. Events carry `"v":1` (schema

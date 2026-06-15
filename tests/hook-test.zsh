@@ -80,6 +80,13 @@ check "meta name (rename)" "$(grep '"id":"claude-s7"' "$LOG" | grep '"ev":"meta"
 check "meta ctx sum" "$(grep '"id":"claude-s7"' "$LOG" | grep '"ev":"meta"' | jq -r '.ctx' | tail -1)" "51000"
 check "meta mode" "$(grep '"id":"claude-s7"' "$LOG" | grep '"ev":"meta"' | jq -r '.mode' | tail -1)" "auto"
 
+# A permission Notification can embed a secret-bearing tool call; the emitted
+# waiting msg must be redacted, not logged (or notified) raw.
+fire '{"hook_event_name":"UserPromptSubmit","session_id":"s10","cwd":"/tmp","prompt":"go"}'
+fire "$(jq -cn --arg m "Claude needs your permission to use Bash(curl -H 'Authorization: Bearer sk-verysecrettoken12345')" '{hook_event_name:"Notification",session_id:"s10",cwd:"/tmp",message:$m}')"
+check "notification secret not logged" "$(grep '"id":"claude-s10"' "$LOG" | grep '"ev":"waiting"' | grep -c 'verysecrettoken')" "0"
+check "notification msg masked"        "$(grep '"id":"claude-s10"' "$LOG" | grep '"ev":"waiting"' | jq -r '.msg' | grep -c '•••')" "1"
+
 # Every emitted event carries the schema version.
 check "events are v:1" "$(grep -c '"v":1' "$LOG")" "$(grep -c '"ev":' "$LOG")"
 

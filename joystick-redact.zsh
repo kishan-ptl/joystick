@@ -27,7 +27,7 @@
 # JSON string escaping for emitted event fields. Named escapes first, then strip
 # any remaining control chars (e.g. raw ESC bytes in pasted commands). Sets REPLY.
 _joystick_esc() {
-  emulate -L zsh
+  emulate -LR zsh
   local s=$1
   s=${s//\\/\\\\}
   s=${s//\"/\\\"}
@@ -41,8 +41,9 @@ _joystick_esc() {
 # Replace regex matches in the dynamically-scoped variable `s`.
 # $1=ERE pattern  $2=group index to redact (0 = whole match)  $3=1 for case-insensitive
 _joystick_sub() {
-  emulate -L zsh   # user zshrc may set bash_rematch/re_match_pcre, which
-                   # would stop zsh from populating MATCH/MBEGIN/MEND below
+  emulate -LR zsh  # -R resets options to zsh defaults so a user's bash_rematch /
+                   # re_match_pcre can't stop zsh populating MATCH/MBEGIN/MEND below.
+                   # Plain -L is NOT enough: it won't unset an already-set option.
   local pat=$1 grp=${2:-0} ci=${3:-0} iter=0 hay
   while (( iter++ < 25 )); do
     if (( ci )); then hay=${(L)s}; else hay=$s; fi
@@ -56,7 +57,7 @@ _joystick_sub() {
 }
 
 _joystick_redact() {
-  emulate -L zsh
+  emulate -LR zsh   # also guarantees GLOB_SUBST is off, so the literal replace below
   local s=$1
 
   # --- 1. Context rules -----------------------------------------------------
@@ -79,7 +80,10 @@ _joystick_redact() {
   for w in ${(s: :)s}; do
     (( ${#w} >= 24 )) || continue
     [[ $w == -* || $w == *[/•]* ]] && continue
-    s=${s//${(q)w}/${w[1,4]}…}
+    # Literal substring replace: under `emulate -LR zsh` GLOB_SUBST is off, so $w
+    # matches verbatim — shell-special chars and all. Do NOT add a quoting flag
+    # here; (q) backslash-escapes and breaks the match for quoted/bracketed tokens.
+    s=${s//$w/${w[1,4]}…}
   done
 
   typeset -g REPLY=$s
