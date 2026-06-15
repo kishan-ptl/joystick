@@ -93,12 +93,25 @@ close_turn() {  # $1 = exit code  $2 = notify title  $3 = notify verb
   emit_meta "$tpath"
 }
 
+# The git worktree this session lives in, if any. A LINKED worktree keeps its
+# git-dir under .../worktrees/<name>; the main checkout does not. We surface the
+# worktree's directory leaf so several Claude sessions on the same repo (a
+# common parallel-work setup here) are told apart on the board. Empty for the
+# main checkout or a non-git dir — one cheap `git rev-parse`, fully fail-silent.
+worktree_name() {  # $1 = dir
+  local gd top
+  gd=$(git -C "$1" rev-parse --git-dir 2>/dev/null) || return 0
+  [[ $gd == */worktrees/* ]] || return 0
+  top=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 0
+  print -r -- "${top:t}"
+}
+
 # Emit session metadata from the Claude transcript: topic title, model,
 # permission mode, and context-window fill (the latest request's token count =
 # input + cache_read + cache_creation). Runs on turn close (async).
 # $1 = the transcript path close_turn already resolved (empty if none).
 emit_meta() {  # $1 = transcript path (may be empty)
-  local tpath=$1 title mode model ctx name color
+  local tpath=$1 title mode model ctx name color wt
   [[ -n $tpath ]] || return 0
   title=$(grep -F '"type":"ai-title"' "$tpath" 2>/dev/null | tail -1 | jq -r '.aiTitle // empty' 2>/dev/null)
   mode=$(grep -F '"type":"permission-mode"' "$tpath" 2>/dev/null | tail -1 | jq -r '.permissionMode // empty' 2>/dev/null)
@@ -112,9 +125,12 @@ emit_meta() {  # $1 = transcript path (may be empty)
   [[ -n $title ]] && { _joystick_redact "$title"; title=${REPLY[1,80]}; }
   [[ -n $name  ]] && { _joystick_redact "$name";  name=${REPLY[1,40]}; }
   [[ -n $color ]] && color=${color[1,16]}   # a palette name; cap, no redaction needed
+  # Worktree leaf: a path component (already present unredacted in `cwd`), so
+  # cap only — no redaction needed; the cap keeps the line < PIPE_BUF.
+  wt=$(worktree_name "$cwd"); wt=${wt[1,40]}
   jq -cn --arg id "$id" --arg title "${title:-}" --arg model "${model:-}" --arg mode "${mode:-}" \
-    --arg name "${name:-}" --arg color "${color:-}" --argjson ctx "${ctx:-0}" --argjson ts "$now" \
-    '{v:1,ev:"meta",id:$id,title:$title,model:$model,mode:$mode,name:$name,color:$color,ctx:$ctx,ts:$ts}' >> "$LOG"
+    --arg name "${name:-}" --arg color "${color:-}" --arg wt "${wt:-}" --argjson ctx "${ctx:-0}" --argjson ts "$now" \
+    '{v:1,ev:"meta",id:$id,title:$title,model:$model,mode:$mode,name:$name,color:$color,wt:$wt,ctx:$ctx,ts:$ts}' >> "$LOG"
 }
 
 case $event in

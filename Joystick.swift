@@ -32,6 +32,7 @@ struct RawEvent: Decodable {
     let ctx: Double?       // context-window tokens used, on `meta` events
     let name: String?      // user-set session title (rename), on `meta` events
     let color: String?     // user-set session color (agent color), on `meta` events
+    let wt: String?        // git worktree leaf the session runs in (linked worktrees only), on `meta` events
 }
 
 struct Op: Identifiable {
@@ -59,6 +60,7 @@ struct Op: Identifiable {
     var ctxTokens: Double = 0         // context-window fill (from meta events)
     var sessionName = ""              // user-given session title (rename), from meta
     var agentColor = ""               // user-given session color name, from meta
+    var worktree = ""                 // git worktree leaf (linked worktrees only), from meta
 
     var id: String { "\(key)-\(Int(start))" }
     var isRunning: Bool { endTs == nil }
@@ -83,7 +85,7 @@ struct SurfaceGroup: Identifiable {
 }
 
 // Per-session metadata from the transcript (`meta` events), keyed by claude-<sid>.
-struct SessionMeta { var title = ""; var model = ""; var mode = ""; var ctx: Double = 0; var name = ""; var color = "" }
+struct SessionMeta { var title = ""; var model = ""; var mode = ""; var ctx: Double = 0; var name = ""; var color = ""; var wt = "" }
 
 // Outcome of running the in-app setup (install.sh).
 enum SetupResult: Equatable { case ok, failed(String) }
@@ -515,6 +517,7 @@ final class Store: ObservableObject {
             g.current.title = m.title; g.current.model = m.model
             g.current.mode = m.mode; g.current.ctxTokens = m.ctx
             g.current.sessionName = m.name; g.current.agentColor = m.color
+            g.current.worktree = m.wt
             return g
         }
         activeGroups = active.map(withMeta)
@@ -849,7 +852,8 @@ final class Store: ObservableObject {
             // the end event, so the op is already in `done` — keep it separate.
             parsedMeta[e.id] = SessionMeta(title: e.title ?? "", model: e.model ?? "",
                                            mode: e.mode ?? "", ctx: e.ctx ?? 0,
-                                           name: e.name ?? "", color: e.color ?? "")
+                                           name: e.name ?? "", color: e.color ?? "",
+                                           wt: e.wt ?? "")
         default:
             break
         }
@@ -1179,6 +1183,31 @@ struct SessionEyebrow: View {
     }
 }
 
+// A worktree marker, shown on a Claude row whose session lives in a LINKED git
+// worktree (not the main checkout). Several Claude sessions on one repo —
+// the everyday parallel-work setup here — otherwise look identical; this names
+// the worktree so you know which is which. Neutral grey + a branch glyph so it
+// reads as "where," staying out of the agent-color rename pill's lane.
+struct WorktreeChip: View {
+    let name: String
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.system(size: 8, weight: .semibold))
+            Text(name)
+                .font(.caption2.weight(.semibold))
+                .lineLimit(1)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Color.secondary.opacity(0.12), in: Capsule())
+        .overlay(Capsule().strokeBorder(Color.secondary.opacity(0.3), lineWidth: 0.5))
+        .help("git worktree: \(name)")
+    }
+}
+
 struct OpRow: View {
     let op: Op
     let nowTs: Double
@@ -1360,14 +1389,19 @@ struct GroupRow: View {
         // So: text is NOT selectable; the whole row is a plain click → focus,
         // and copy lives in the right-click menu (whole command / directory).
         VStack(alignment: .leading, spacing: 1) {
-            // Eyebrow above the prompt: your rename pill (if set) + Claude's
-            // auto-generated session topic, both shown. The prompt stays the
-            // label below. The pill is tinted by the session's agent color.
+            // Eyebrow above the prompt: the worktree chip (if this session runs
+            // in a linked git worktree) + your rename pill (if set) + Claude's
+            // auto-generated session topic. The prompt stays the label below.
+            // The rename pill is tinted by the session's agent color.
             let badgeName = group.current.sessionName
             let topic = group.current.title
-            if !badgeName.isEmpty || !topic.isEmpty {
+            let worktree = group.current.worktree
+            if !worktree.isEmpty || !badgeName.isEmpty || !topic.isEmpty {
                 HStack(spacing: 6) {
                     Spacer().frame(width: 43)   // align under the command text
+                    if !worktree.isEmpty {
+                        WorktreeChip(name: worktree)
+                    }
                     if !badgeName.isEmpty {
                         SessionEyebrow(name: badgeName,
                                        tint: Color.claudeAgent(group.current.agentColor))
