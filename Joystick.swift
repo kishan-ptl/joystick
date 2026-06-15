@@ -1165,13 +1165,13 @@ struct OpRow: View {
                         .lineLimit(2)
                 }
                 Text(subtitle)
-                    .font(.system(.caption, design: .monospaced))
+                    .font(.system(.caption).monospacedDigit())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
             Spacer(minLength: 12)
             Text(timeText)
-                .font(.system(.callout, design: .monospaced).weight(.medium))
+                .font(.system(.callout).weight(.medium).monospacedDigit())
                 .foregroundStyle(op.isService ? Color.green
                                  : (op.isRunning && op.isClaude && !op.isWaiting) ? Color.claudeOrange
                                  : op.isRunning ? Color.accentColor : .secondary)
@@ -1421,6 +1421,7 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 400, minHeight: 320)
+        .background { if keyboardNav { VisualEffectBackground().ignoresSafeArea() } }
         .onAppear {
             store.refreshWiring()
             store.reload()
@@ -1432,6 +1433,7 @@ struct ContentView: View {
                 Summoner.shared.reopen = { openWindow(id: "main") }
                 installKeyMonitor()
                 persistWindowFrame()
+                styleMainWindow()
                 store.selectForSummon()
                 DispatchQueue.main.async { searchFocused = true }
             }
@@ -1447,6 +1449,7 @@ struct ContentView: View {
         // you" row, then grab the field so you can type-to-filter immediately.
         .onReceive(NotificationCenter.default.publisher(for: Summoner.didSummon)) { _ in
             guard keyboardNav else { return }
+            styleMainWindow()   // re-assert non-opacity in case SwiftUI reset it
             store.filterText = ""
             store.selectForSummon()
             searchFocused = true
@@ -1470,7 +1473,7 @@ struct ContentView: View {
 
     private var hintFooter: some View {
         Text("↑↓ move · ⏎ focus · ⌘1–9 jump · esc close · ⌥⌘J summon")
-            .font(.system(.caption2, design: .rounded))
+            .font(.system(.caption2))
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
@@ -1491,10 +1494,10 @@ struct ContentView: View {
                       : store.activeGroups.isEmpty ? Color.secondary.opacity(0.4) : Color.green)
                 .frame(width: 9, height: 9)
             Text(parts.isEmpty ? "Idle" : parts.joined(separator: " · "))
-                .font(.system(.subheadline, design: .rounded).weight(.semibold))
+                .font(.system(.subheadline).weight(.semibold))
             Spacer()
             Text("❯ \(store.commandsToday) today")
-                .font(.system(.caption, design: .rounded))
+                .font(.system(.caption))
                 .foregroundStyle(.secondary)
                 .help("Shell commands + Claude turns started today")
             Toggle("Pin", isOn: $floatOnTop)
@@ -1516,7 +1519,7 @@ struct ContentView: View {
                     Section("Terminals") {
                         if store.visibleGroups.isEmpty {
                             Text(store.filterText.isEmpty ? "No terminals yet" : "No matches")
-                                .font(.system(.body, design: .monospaced))
+                                .font(.body)
                                 .foregroundStyle(.secondary)
                         } else {
                             ForEach(store.visibleGroups) { g in row(g, nowTs) }
@@ -1529,7 +1532,7 @@ struct ContentView: View {
                     Section("Running") {
                         if store.activeGroups.isEmpty {
                             Text("Nothing running")
-                                .font(.system(.body, design: .monospaced))
+                                .font(.body)
                                 .foregroundStyle(.secondary)
                         } else {
                             ForEach(store.activeGroups) { g in row(g, nowTs) }
@@ -1543,6 +1546,7 @@ struct ContentView: View {
                 }
             }
             .listStyle(.inset)
+            .scrollContentBackground(.hidden)   // let the window's vibrancy show through the rows
             // Keep the keyboard cursor on screen as it moves through a long list.
             .onChange(of: store.selectedKey) { _, key in
                 guard keyboardNav, let key else { return }
@@ -1616,6 +1620,17 @@ struct ContentView: View {
         let name = NSWindow.FrameAutosaveName("JoystickMain")
         w.setFrameUsingName(name)
         w.setFrameAutosaveName(name)
+    }
+
+    // Frosted-glass chrome for the summoned window: a behind-window vibrancy
+    // material fills the content (VisualEffectBackground in body), so the window
+    // itself must be non-opaque with a clear backing for the blur to show what's
+    // behind it. titleVisibility is left alone so w.title stays "Joystick" and
+    // Summoner's window lookup still resolves.
+    private func styleMainWindow() {
+        guard let w = NSApp.windows.first(where: { $0.title == "Joystick" && $0.canBecomeMain }) else { return }
+        w.isOpaque = false
+        w.backgroundColor = .clear
     }
 }
 
@@ -1722,6 +1737,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotKey = HotKey(keyCode: 38, modifiers: UInt32(cmdKey | optionKey)) {
             Summoner.shared.summon()
         }
+    }
+}
+
+// A frosted-glass backdrop: an AppKit NSVisualEffectView bridged into SwiftUI.
+// behindWindow blending samples whatever is behind a non-opaque window (see
+// ContentView.styleMainWindow) and blurs it — the Spotlight/Raycast material.
+// state = .active keeps it frosted even when the app isn't the key window.
+struct VisualEffectBackground: NSViewRepresentable {
+    var material: NSVisualEffectView.Material = .sidebar
+    var blending: NSVisualEffectView.BlendingMode = .behindWindow
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let v = NSVisualEffectView()
+        v.material = material
+        v.blendingMode = blending
+        v.state = .active
+        return v
+    }
+    func updateNSView(_ v: NSVisualEffectView, context: Context) {
+        v.material = material
+        v.blendingMode = blending
     }
 }
 
