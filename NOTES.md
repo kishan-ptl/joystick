@@ -87,6 +87,29 @@ with Chrome/Firefox's "JavaScript console" shortcut (a global hotkey wins
 system-wide). Fine personally; a **rebinding UI** (folds into the planned v0.2
 Settings) should land before shipping the cask.
 
+## Worktree chip on Claude rows (2026-06-14)
+
+We routinely run several Claude sessions on this repo at once, each in its own
+`~/joystick-wt/<feature>` worktree (see CLAUDE.md "Parallel sessions"). On the
+board those rows looked identical — same repo, same cwd tail — so you couldn't
+tell which session was which. Now a Claude row whose session lives in a **linked**
+git worktree carries a small grey branch chip (`⑂ <worktree>`) in the eyebrow,
+left of the rename pill / topic.
+
+- **Where it's computed:** `claude-hook.sh` `emit_meta()` runs one
+  `git -C <cwd> rev-parse` per turn and carries the worktree leaf as a new
+  optional `wt` field on the `meta` event (session-level, like title/model/ctx).
+  It rides the existing meta → `SessionMeta` → `withMeta` → eyebrow path, so the
+  viewer stays git-free.
+- **"Linked worktree only":** the chip shows iff the git-dir sits under
+  `.../worktrees/<name>` — i.e. a real linked worktree, never the main checkout
+  (which would just clutter every row). Empty `wt` ⇒ no chip; non-git/`cwd` gone
+  ⇒ fail-silent empty.
+- **Name = the worktree directory's basename** (`rev-parse --show-toplevel`
+  leaf), which in our workflow equals the branch — the name you'd recognize.
+- **Scope:** Claude rows only (`wt` only flows through `meta`). Shell rows
+  already show their `cwd` and aren't the parallel-session pain point.
+
 ## Roadmap
 
 ### v0.1 — shareable (1–2 weekends)

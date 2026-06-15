@@ -32,6 +32,7 @@ struct RawEvent: Decodable {
     let ctx: Double?       // context-window tokens used, on `meta` events
     let name: String?      // user-set session title (rename), on `meta` events
     let color: String?     // user-set session color (agent color), on `meta` events
+    let wt: String?        // git worktree leaf the session runs in (linked worktrees only), on `meta` events
 }
 
 struct Op: Identifiable {
@@ -59,6 +60,7 @@ struct Op: Identifiable {
     var ctxTokens: Double = 0         // context-window fill (from meta events)
     var sessionName = ""              // user-given session title (rename), from meta
     var agentColor = ""               // user-given session color name, from meta
+    var worktree = ""                 // git worktree leaf (linked worktrees only), from meta
 
     var id: String { "\(key)-\(Int(start))" }
     var isRunning: Bool { endTs == nil }
@@ -83,10 +85,14 @@ struct SurfaceGroup: Identifiable {
 }
 
 // Per-session metadata from the transcript (`meta` events), keyed by claude-<sid>.
-struct SessionMeta { var title = ""; var model = ""; var mode = ""; var ctx: Double = 0; var name = ""; var color = "" }
+struct SessionMeta { var title = ""; var model = ""; var mode = ""; var ctx: Double = 0; var name = ""; var color = ""; var wt = "" }
 
 // Outcome of running the in-app setup (install.sh).
 enum SetupResult: Equatable { case ok, failed(String) }
+
+// Apple Events permission to control Ghostty (drives click-to-focus). .denied
+// means the user said no (or it's off in Privacy settings) — we surface a banner.
+enum AutomationStatus { case granted, denied, notDetermined, unknown }
 
 // MARK: - Store
 
@@ -106,6 +112,7 @@ final class Store: ObservableObject {
     @Published var claudeWired = false
     @Published var isSettingUp = false
     @Published var setupResult: SetupResult? = nil
+    @Published var automation: AutomationStatus = .unknown
     var needsSetup: Bool { !shellWired || !claudeWired }
     // Show the onboarding banner while unwired, and briefly after a successful
     // run (to show the "open a new terminal" nudge until dismissed).
@@ -197,6 +204,7 @@ final class Store: ObservableObject {
         commandsToday = UserDefaults.standard.integer(forKey: "commandsToday")
         tallyDayStart = UserDefaults.standard.double(forKey: "tallyDayStart")
         refreshWiring()
+        refreshAutomation()
         reload()
         // Watch the log instead of polling it: near-instant pickup of new
         // sessions and state changes, and ~zero wakeups while the log is quiet.
@@ -277,6 +285,12 @@ final class Store: ObservableObject {
         guard FileManager.default.fileExists(atPath: installer) else {
             setupResult = .failed("Installer missing from app bundle"); return
         }
+        // install.sh needs jq to merge the Claude hooks. Check up front so we
+        // give a clear message instead of a partial wiring + cryptic failure.
+        // (The Homebrew cask also declares depends_on jq, covering brew installs.)
+        guard Self.jqPath() != nil else {
+            setupResult = .failed("jq is required. Install it with:  brew install jq"); return
+        }
         isSettingUp = true
         setupResult = nil
         DispatchQueue.global(qos: .userInitiated).async {
@@ -304,6 +318,10 @@ final class Store: ObservableObject {
                 self.refreshWiring()
                 if code == 0 && !self.needsSetup {
                     self.setupResult = .ok
+                    // Hooks are wired — ask for Ghostty automation now, so the first
+                    // click-to-focus isn't a surprise system prompt later.
+                    _ = self.ghosttyAutomation(prompt: true)
+                    self.refreshAutomation()
                 } else {
                     let last = output.split(whereSeparator: \.isNewline).last.map(String.init)
                     self.setupResult = .failed(last ?? "Setup failed — check that jq is installed")
@@ -311,6 +329,29 @@ final class Store: ObservableObject {
             }
         }
     }
+
+    // First jq on the likely PATHs (Finder-launched apps don't inherit the shell's).
+    nonisolated static func jqPath() -> String? {
+        ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+            .map { $0 + "/jq" }
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    // Whether we're allowed to send Apple Events to Ghostty (click-to-focus).
+    // prompt=false reports status silently; prompt=true shows the one-time
+    // consent dialog when undetermined. .unknown covers "Ghostty not running".
+    @discardableResult
+    func ghosttyAutomation(prompt: Bool) -> AutomationStatus {
+        let target = NSAppleEventDescriptor(bundleIdentifier: "com.mitchellh.ghostty")
+        guard let desc = target.aeDesc else { return .unknown }
+        let status = AEDeterminePermissionToAutomateTarget(desc, typeWildCard, typeWildCard, prompt)
+        if status == noErr { return .granted }
+        if status == OSStatus(errAEEventNotPermitted) { return .denied }
+        if status == OSStatus(errAEEventWouldRequireUserConsent) { return .notDetermined }
+        return .unknown   // procNotFound (Ghostty not running), etc.
+    }
+
+    func refreshAutomation() { automation = ghosttyAutomation(prompt: false) }
 
     // Make the focused-tab highlight responsive without a perpetual poll. The
     // instant Ghostty becomes frontmost we sample immediately (switching INTO
@@ -476,6 +517,7 @@ final class Store: ObservableObject {
             g.current.title = m.title; g.current.model = m.model
             g.current.mode = m.mode; g.current.ctxTokens = m.ctx
             g.current.sessionName = m.name; g.current.agentColor = m.color
+            g.current.worktree = m.wt
             return g
         }
         activeGroups = active.map(withMeta)
@@ -810,7 +852,8 @@ final class Store: ObservableObject {
             // the end event, so the op is already in `done` — keep it separate.
             parsedMeta[e.id] = SessionMeta(title: e.title ?? "", model: e.model ?? "",
                                            mode: e.mode ?? "", ctx: e.ctx ?? 0,
-                                           name: e.name ?? "", color: e.color ?? "")
+                                           name: e.name ?? "", color: e.color ?? "",
+                                           wt: e.wt ?? "")
         default:
             break
         }
@@ -1082,14 +1125,16 @@ struct ClaudeThinkingIcon: View {
     }
 }
 
-// A row that needs you, shown as a soft yellow light that gently breathes —
-// opacity (and a faint glow) eased in and out on a sine, calm rather than an
-// attention-grabbing on/off blink. TimelineView drives the redraw, so it pauses
-// when the row is off-screen and survives row reloads with no manual Timer/@State
-// to leak or reset — same approach as ClaudeThinkingIcon.
+// A row that needs you, shown as a soft golden light that gently breathes —
+// opacity eased in and out on a sine, calm rather than an attention-grabbing
+// on/off blink. No glow/halo: the light stays contained within the circle's
+// perimeter. TimelineView drives the redraw, so it pauses when the row is
+// off-screen and survives row reloads with no manual Timer/@State to leak or
+// reset — same approach as ClaudeThinkingIcon.
 struct WaitingLight: View {
     private static let period = 2.0          // seconds per full breath
     private static let fps = 24.0
+    private static let gold = Color(hex: 0xFFC107)   // warm golden, not lemon-yellow
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1.0 / Self.fps)) { context in
@@ -1097,10 +1142,9 @@ struct WaitingLight: View {
             let phase = (sin(t / Self.period * 2 * Double.pi) + 1) / 2   // 0…1, smooth
             let level = 0.3 + 0.7 * phase                                // 0.3…1.0
             Image(systemName: "circle.fill")
-                .font(.system(size: 13))
-                .foregroundStyle(.yellow)
+                .font(.system(size: 9))
+                .foregroundStyle(Self.gold)
                 .opacity(level)
-                .shadow(color: .yellow.opacity(level * 0.7), radius: 3)   // breathing halo
                 .frame(width: 16, height: 16)   // fixed box so it lines up with the other glyphs
         }
     }
@@ -1139,9 +1183,36 @@ struct SessionEyebrow: View {
     }
 }
 
+// A worktree marker, shown on a Claude row whose session lives in a LINKED git
+// worktree (not the main checkout). Several Claude sessions on one repo —
+// the everyday parallel-work setup here — otherwise look identical; this names
+// the worktree so you know which is which. Neutral grey + a branch glyph so it
+// reads as "where," staying out of the agent-color rename pill's lane.
+struct WorktreeChip: View {
+    let name: String
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.system(size: 8, weight: .semibold))
+            Text(name)
+                .font(.caption2.weight(.semibold))
+                .lineLimit(1)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Color.secondary.opacity(0.12), in: Capsule())
+        .overlay(Capsule().strokeBorder(Color.secondary.opacity(0.3), lineWidth: 0.5))
+        .help("git worktree: \(name)")
+    }
+}
+
 struct OpRow: View {
     let op: Op
     let nowTs: Double
+    var jumpNumber: Int? = nil      // ⌘N jump hint (window nav only); nil = none
+    var showJumpSlot = false        // reserve the trailing slot so the time column stays aligned
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -1175,8 +1246,28 @@ struct OpRow: View {
                 .foregroundStyle(op.isService ? Color.green
                                  : (op.isRunning && op.isClaude && !op.isWaiting) ? Color.claudeOrange
                                  : op.isRunning ? Color.accentColor : .secondary)
+            if showJumpSlot { jumpBadge }
         }
         .padding(.vertical, 3)
+    }
+
+    // ⌘1–9 jump affordance: a quiet keycap at the row's trailing edge so the
+    // shortcut is discoverable. Only the first 9 rows get a number; the rest
+    // reserve the same width so the time column stays aligned.
+    @ViewBuilder
+    private var jumpBadge: some View {
+        if let n = jumpNumber {
+            Text("⌘\(n)")
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                .overlay(Capsule().strokeBorder(Color.secondary.opacity(0.22), lineWidth: 0.5))
+                .frame(width: 30, alignment: .trailing)
+        } else {
+            Color.clear.frame(width: 30)
+        }
     }
 
     private var statusIcon: some View {
@@ -1195,7 +1286,7 @@ struct OpRow: View {
                 Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
             }
         }
-        .font(.system(size: 16))
+        .font(.system(size: 11))
     }
 
     private var subtitle: String {
@@ -1232,11 +1323,50 @@ struct OpRow: View {
     }
 }
 
+// macOS spends the first click on a background window just to activate it, so a
+// click on a Joystick row while another app is frontmost only raises Joystick —
+// you'd need a second click to actually jump. This transparent overlay makes
+// that first click count: it accepts the first mouse and runs the row's action
+// directly. It claims the hit ONLY while the window is in the background
+// (hitTest returns nil once Joystick is key), so when we're already frontmost
+// SwiftUI's own tap gesture, hover and right-click context menu behave exactly
+// as before. Safe because the row action is non-destructive (focus a terminal);
+// ending a task is keyboard-only and gated, never reachable from a stray click.
+private struct FirstMouseView: NSViewRepresentable {
+    let action: () -> Void
+    func makeNSView(context: Context) -> NSView { Catcher(action: action) }
+    func updateNSView(_ view: NSView, context: Context) {
+        (view as? Catcher)?.action = action
+    }
+
+    final class Catcher: NSView {
+        var action: () -> Void
+        init(action: @escaping () -> Void) {
+            self.action = action
+            super.init(frame: .zero)
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        // Defer entirely to the SwiftUI content underneath while Joystick is key;
+        // only become the hit target (and thus catch the first-mouse click) when
+        // the window is in the background — the exact case we're fixing.
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            (window?.isKeyWindow ?? false) ? nil : super.hitTest(point)
+        }
+
+        override func mouseDown(with event: NSEvent) { action() }
+    }
+}
+
 struct GroupRow: View {
     let group: SurfaceGroup
     let nowTs: Double
     var focusedSurface: String? = nil
     var isSelected: Bool = false   // under the keyboard cursor (window nav only)
+    var keyboardNav: Bool = false  // window list — shows the ⌘N jump hint
+    var jumpNumber: Int? = nil     // this row's ⌘N number (1–9), if in range
     let action: () -> Void
 
     // Is this the Ghostty tab/split focused right now? Shell rows group BY
@@ -1259,14 +1389,19 @@ struct GroupRow: View {
         // So: text is NOT selectable; the whole row is a plain click → focus,
         // and copy lives in the right-click menu (whole command / directory).
         VStack(alignment: .leading, spacing: 1) {
-            // Eyebrow above the prompt: your rename pill (if set) + Claude's
-            // auto-generated session topic, both shown. The prompt stays the
-            // label below. The pill is tinted by the session's agent color.
+            // Eyebrow above the prompt: the worktree chip (if this session runs
+            // in a linked git worktree) + your rename pill (if set) + Claude's
+            // auto-generated session topic. The prompt stays the label below.
+            // The rename pill is tinted by the session's agent color.
             let badgeName = group.current.sessionName
             let topic = group.current.title
-            if !badgeName.isEmpty || !topic.isEmpty {
+            let worktree = group.current.worktree
+            if !worktree.isEmpty || !badgeName.isEmpty || !topic.isEmpty {
                 HStack(spacing: 6) {
                     Spacer().frame(width: 43)   // align under the command text
+                    if !worktree.isEmpty {
+                        WorktreeChip(name: worktree)
+                    }
                     if !badgeName.isEmpty {
                         SessionEyebrow(name: badgeName,
                                        tint: Color.claudeAgent(group.current.agentColor))
@@ -1280,7 +1415,8 @@ struct GroupRow: View {
                     Spacer(minLength: 0)
                 }
             }
-            OpRow(op: group.current, nowTs: nowTs)
+            OpRow(op: group.current, nowTs: nowTs,
+                  jumpNumber: jumpNumber, showJumpSlot: keyboardNav)
             ForEach(group.history) { op in
                 HStack(spacing: 0) {
                     Spacer().frame(width: 43)  // align under the command text
@@ -1300,6 +1436,9 @@ struct GroupRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .onTapGesture { action() }
+        // Let the click land on the FIRST press even when Joystick is in the
+        // background (see FirstMouseView). Transparent while we're frontmost.
+        .overlay { FirstMouseView(action: action) }
         .help("Click to focus this tab in Ghostty · right-click to copy")
         .contextMenu { copyMenu(for: group.current) }
         // The keyboard cursor is an accent-tinted FILL across the whole row, not
@@ -1390,6 +1529,33 @@ struct SetupBanner: View {
     }
 }
 
+// Shown when macOS automation permission to control Ghostty has been denied —
+// without it, click-to-focus (the core feature) silently does nothing. Deep-links
+// to the exact Privacy pane so the user can flip it back on.
+struct PermissionBanner: View {
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Can't control Ghostty").font(.callout.weight(.semibold))
+                Text("Click-to-focus needs Automation permission.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Button("Open Settings") {
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            .controlSize(.small)
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.orange.opacity(0.12)))
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var store: Store
     @Environment(\.openWindow) private var openWindow
@@ -1414,6 +1580,9 @@ struct ContentView: View {
             if store.showSetupBanner {
                 SetupBanner(store: store)
             }
+            if store.automation == .denied {
+                PermissionBanner()
+            }
             opList
             if keyboardNav {
                 Divider()
@@ -1424,6 +1593,7 @@ struct ContentView: View {
         .background { if keyboardNav { VisualEffectBackground().ignoresSafeArea() } }
         .onAppear {
             store.refreshWiring()
+            store.refreshAutomation()
             store.reload()
             // Apply the default pin state — onChange only fires on a *change*,
             // so without this the toggle would read "on" while windows stayed
@@ -1522,8 +1692,10 @@ struct ContentView: View {
                                 .font(.body)
                                 .foregroundStyle(.secondary)
                         } else {
-                            ForEach(store.visibleGroups) { g in row(g, nowTs) }
-                                .onMove { src, dst in store.moveSlots(fromOffsets: src, toOffset: dst) }
+                            ForEach(Array(store.visibleGroups.enumerated()), id: \.element.id) { idx, g in
+                                row(g, nowTs, index: idx)
+                            }
+                            .onMove { src, dst in store.moveSlots(fromOffsets: src, toOffset: dst) }
                         }
                     }
                 } else {
@@ -1555,10 +1727,12 @@ struct ContentView: View {
         }
     }
 
-    private func row(_ g: SurfaceGroup, _ nowTs: Double) -> some View {
+    private func row(_ g: SurfaceGroup, _ nowTs: Double, index: Int = 0) -> some View {
         GroupRow(group: g, nowTs: nowTs,
                  focusedSurface: store.focusedSurface,
-                 isSelected: keyboardNav && g.key == store.selectedKey) {
+                 isSelected: keyboardNav && g.key == store.selectedKey,
+                 keyboardNav: keyboardNav,
+                 jumpNumber: (keyboardNav && index < 9) ? index + 1 : nil) {
             store.selectedKey = g.key   // a mouse click also moves the cursor
             store.focus(g.current)
         }
@@ -1614,11 +1788,17 @@ struct ContentView: View {
 
     // Remember the window's size/position across hides and relaunches. SwiftUI's
     // own restoration doesn't reliably survive our manual show/hide, so pin it
-    // explicitly with an AppKit frame autosave.
+    // explicitly with an AppKit frame autosave. On first run (nothing saved yet)
+    // seed the frame we settled on: 400×686, anchored to the top-right of the
+    // screen — the menubar-companion shape, out of the way of editor windows.
     private func persistWindowFrame() {
         guard let w = NSApp.windows.first(where: { $0.title == "Joystick" && $0.canBecomeMain }) else { return }
         let name = NSWindow.FrameAutosaveName("JoystickMain")
-        w.setFrameUsingName(name)
+        if !w.setFrameUsingName(name), let vf = (w.screen ?? NSScreen.main)?.visibleFrame {
+            let size = NSSize(width: 400, height: min(686, vf.height))
+            let origin = NSPoint(x: vf.maxX - size.width, y: vf.maxY - size.height)
+            w.setFrame(NSRect(origin: origin, size: size), display: true)
+        }
         w.setFrameAutosaveName(name)
     }
 
@@ -1772,6 +1952,7 @@ struct JoystickApp: App {
         Window("Joystick", id: "main") {
             ContentView(keyboardNav: true).environmentObject(store)
         }
+        .defaultSize(width: 400, height: 686)
 
         // The app now owns the menubar itself (replacing the SwiftBar plugin).
         MenuBarExtra {
