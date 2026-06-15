@@ -74,18 +74,36 @@ close_turn() {  # $1 = exit code  $2 = notify title  $3 = notify verb
   last=$(tail -n 2000 "$LOG" 2>/dev/null | grep -F "\"id\":\"$id\"" | grep -E '"ev":"(start|end)"' | tail -1)
   [[ $last == *'"ev":"start"'* ]] || return 0
   start_ts=$(jq -r '.ts // 0' <<<"$last")
-  elapsed=$(( now - start_ts ))
-  # Claude's closing blurb = the last assistant text block in the transcript;
-  # show it on the finished row so you can see what it said without switching
-  # back. Flatten to one line, then redact + cap like every other free-text
-  # field so the log line stays < PIPE_BUF and never stores a secret. Empty
-  # (turn ended on a tool call / no final text) → omit msg; row looks as before.
+  # Claude's closing blurb = the text of the turn's final assistant message,
+  # the one whose stop_reason is "end_turn". (An intermediate "let me…" line
+  # before a tool call is stop_reason "tool_use" — selecting on end_turn skips
+  # it, so we get the closing reply, not a mid-turn aside.) That final message
+  # often flushes to the transcript a few hundred ms AFTER Stop fires, so a
+  # single read races the writer and grabs the PREVIOUS turn's blurb. Poll for
+  # an end_turn message stamped at/after THIS turn's start: the timestamp gate
+  # guarantees we never show a stale prior-turn reply, and the poll waits out
+  # the flush. Give up blank (omit msg) after ~1.5s so a turn with no final
+  # text — interrupt, tool-call end — doesn't hang the hook. Then flatten to one
+  # line + redact + cap like every free-text field (< PIPE_BUF, no secrets).
   tpath=$(claude_transcript)
   if [[ -n $tpath ]]; then
-    summary=$(tail -n 200 "$tpath" | jq -rc 'select(.type=="assistant")|.message.content[]?|select(.type=="text")|.text' 2>/dev/null | tail -1)
+    local tries=0
+    while (( tries < 15 )); do
+      summary=$(tail -n 400 "$tpath" | jq -rc --argjson since "$start_ts" \
+        'select(.type=="assistant" and .message.stop_reason=="end_turn")
+         | ((.timestamp // "") | sub("\\.[0-9]+Z$";"Z") | (fromdateiso8601? // 0)) as $ets
+         | select($ets >= $since)
+         | .message.content[]? | select(.type=="text") | .text' 2>/dev/null | tail -1)
+      [[ -n $summary ]] && break
+      sleep 0.1
+      (( tries++ ))
+    done
     summary=${summary//[$'\n\t\r']/ }
     _joystick_redact "$summary"; summary=${REPLY[1,240]}
   fi
+  # Re-stamp after the blurb poll (above) so ts/dur reflect close time, not the
+  # up-to-1.5s we may have spent waiting for the final message to flush.
+  now=$(date +%s); elapsed=$(( now - start_ts ))
   jq -cn --arg id "$id" --arg msg "$summary" --argjson ts "$now" --argjson dur "$elapsed" --argjson ex "$1" \
     '{v:1,ev:"end",id:$id,exit:$ex,dur:$dur,ts:$ts} + (if $msg != "" then {msg:$msg} else {} end)' >> "$LOG"
   if (( elapsed >= MIN_NOTIFY_SECS )) && ! ghostty_frontmost; then
