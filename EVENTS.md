@@ -21,7 +21,8 @@ Each operation is two events sharing an `id` — a `start` and an `end`.
 {"v":1,"ev":"active","id":"<id>","ts":<unix>}
 // meta  (Claude only — emitted on turn close; session-level, not per-turn)
 //        (name/color optional — a deliberate rename + agent color; shown as a row badge)
-{"v":1,"ev":"meta","id":"<id>","title":"<topic>","model":"<id>","mode":"<perm-mode>","name":"<rename>","color":"<palette>","ctx":<tokens>,"ts":<unix>}
+//        (wt optional — git worktree leaf when the session runs in a LINKED worktree; shown as a row chip)
+{"v":1,"ev":"meta","id":"<id>","title":"<topic>","model":"<id>","mode":"<perm-mode>","name":"<rename>","color":"<palette>","wt":"<worktree>","ctx":<tokens>,"ts":<unix>}
 ```
 
 > **Line-size invariant (load-bearing):** keep every line **under ~4096 bytes
@@ -46,6 +47,7 @@ Each operation is two events sharing an `id` — a `start` and an `end`.
 | `exit` / `dur` / `msg` | end status / duration / reason (waiting why, or Claude's closing blurb on `end`) |
 | `title` / `model` / `mode` / `ctx` | `meta` only — session topic, model id, permission mode, context-window tokens used |
 | `name` / `color` | `meta` only — user-set session rename (**sanitized**) + agent color name; shown as a row badge. Empty/absent when unset |
+| `wt` | `meta` only — git worktree leaf (the worktree directory's basename) when the session runs in a LINKED worktree; shown as a row chip. Empty/absent on the main checkout |
 
 ## Producers
 
