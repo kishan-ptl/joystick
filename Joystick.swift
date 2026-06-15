@@ -414,6 +414,12 @@ final class Store: ObservableObject {
                 // External ops (joystick log) have no local pid/surface — keep
                 // them until an `end` event arrives or the TTL elapses.
                 if op.isExternal { return nowTs - op.start < Self.externalTTL }
+                // minRunningSecs debounces trivial shell noise (a blink-and-gone
+                // `ls`/`cd` never flashes a row). A Claude turn is always a
+                // deliberate prompt, so show it the instant it starts — otherwise
+                // a turn that finishes in <5s lands in a dead zone (too young to
+                // show running, and minDoneSecs below drops it from done too).
+                if op.isClaude { return alive(op.pid) }
                 return alive(op.pid) && nowTs - op.start >= Self.minRunningSecs
             }
 
@@ -436,8 +442,12 @@ final class Store: ObservableObject {
         }
         notifyNewlyWaiting(running: running)
 
+        // minDoneSecs hides trivial finished shell commands (a 2s `ls` leaves no
+        // row). Claude turns and external events are always meaningful — keep them
+        // regardless of duration, so a quick turn doesn't vanish into the gap
+        // between "too young to show running" and "too short to show done".
         var finished = Array(
-            parsedDone.filter { ($0.isExternal || ($0.dur ?? 0) >= Self.minDoneSecs)
+            parsedDone.filter { ($0.isExternal || $0.isClaude || ($0.dur ?? 0) >= Self.minDoneSecs)
                 && nowTs - ($0.endTs ?? 0) <= Self.doneWindowSecs
                 && !ignored($0.cmd) }
                 .sorted { ($0.endTs ?? 0) > ($1.endTs ?? 0) }
