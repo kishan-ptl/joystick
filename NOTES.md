@@ -296,6 +296,18 @@ annoyances are the real v0.2.
   is the proper fix, v0.1
 - Dev note: SourceKit flags "'main' attribute cannot be used..." on
   Joystick.swift — false positive; build-app.sh passes -parse-as-library
+- Queued prompt (typed while a turn is still running) shows at queue-time, not
+  pickup — the row jumps off the still-running turn onto the queued one. Root
+  cause is upstream: `UserPromptSubmit` fires on **submit**, and there is no
+  "picked up" hook event, so a `start` for a queued prompt is indistinguishable
+  from "it's now running." The queued-prompt-race fix above assumes the prior
+  turn just ended (right for a slow Stop) and promotes the new prompt
+  immediately, which is wrong when the prior turn is genuinely still going. The
+  behavior is also erratic + undocumented (one queued message fired
+  `UserPromptSubmit` 4× over 83s; the hook's `start` ts preceded the transcript
+  record by ~40s, i.e. submit-time not pickup-time). We can't reliably tell
+  queued-vs-running from hook events, so we don't guess. Real fix: a Claude Code
+  "turn actually started" signal — worth a /feedback request. (2026-06-15)
 
 ## Resolved in 2026-06-12 architecture review
 - Log re-parsed every 1s tick on main thread → now gated on (mtime, size)
