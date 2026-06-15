@@ -2,7 +2,7 @@
 # joystick claude-hook regression tests — run after editing claude-hook.sh.
 # Uses a throwaway $XDG_STATE_HOME so it never touches the real event log.
 set -u
-H=~/joystick/claude-hook.sh
+H=${0:A:h}/../claude-hook.sh      # the hook beside this test (worktree-aware)
 TMP=$(mktemp -d)
 export XDG_STATE_HOME=$TMP
 export JOYSTICK_NO_NOTIFY=1            # don't fire real macOS notifications
@@ -49,6 +49,23 @@ check "StopFailure -> exit 1" "$(grep '"id":"claude-s5"' "$LOG" | grep '"ev":"en
 fire '{"hook_event_name":"UserPromptSubmit","session_id":"s6","cwd":"/tmp","prompt":"go"}'
 fire '{"hook_event_name":"PostToolUseFailure","session_id":"s6","cwd":"/tmp","tool_name":"Bash"}'
 check "tool failure -> activity" "$(grep '"id":"claude-s6"' "$LOG" | grep '"ev":"active"' | jq -r '.act' | tail -1)" "⚠ Bash failed"
+
+# Subagents (Task/Agent) run in the BACKGROUND: their tool call returns at
+# dispatch, so PostToolUse fires immediately. It must NOT mark the subagent done
+# (that bug made the live line vanish the instant it appeared) — the PreToolUse
+# START line has to survive until the turn ends.
+fire '{"hook_event_name":"UserPromptSubmit","session_id":"s8","cwd":"/tmp","prompt":"go"}'
+fire '{"hook_event_name":"PreToolUse","session_id":"s8","cwd":"/tmp","tool_name":"Task","tool_use_id":"tu1","tool_input":{"description":"Audit X"}}'
+fire '{"hook_event_name":"PostToolUse","session_id":"s8","cwd":"/tmp","tool_name":"Task","tool_use_id":"tu1","tool_input":{"description":"Audit X"}}'
+check "subagent start line emitted" "$(grep '"id":"claude-s8"' "$LOG" | grep '"sub":"tu1"' | grep -c '"act":"Task: Audit X"')" "1"
+check "no subdone at dispatch" "$(grep '"id":"claude-s8"' "$LOG" | grep -c '"subdone":true')" "0"
+
+# A background subagent finishing wakes the session via an injected
+# <task-notification>: the row is labelled from its <summary>, never the raw XML.
+NOTIF='<task-notification><tool-use-id>tu1</tool-use-id><status>completed</status><summary>Agent "Audit X" completed</summary></task-notification>'
+fire "$(jq -cn --arg p "$NOTIF" '{hook_event_name:"UserPromptSubmit",session_id:"s9",cwd:"/tmp",prompt:$p}')"
+check "task-notification labelled from summary" "$(grep '"id":"claude-s9"' "$LOG" | grep '"ev":"start"' | jq -r '.cmd' | tail -1)" '» Agent "Audit X" completed'
+check "raw notification XML not in row" "$(grep '"id":"claude-s9"' "$LOG" | grep -c 'task-notification')" "0"
 
 # meta event: title / mode / model / ctx extracted from the transcript.
 FIX=$TMP/fix.jsonl

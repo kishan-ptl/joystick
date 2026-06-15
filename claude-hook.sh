@@ -158,6 +158,17 @@ case $event in
   UserPromptSubmit)
     rm -f "${LOG:h}/waiting-$sid"
     prompt=$(jq -r '.prompt // ""' <<<"$input")
+    # A background subagent (Task) finishing wakes the session with an injected
+    # <task-notification> — not something you typed. Keep it as a turn (the
+    # session IS working again) but label it from the notification's <summary>,
+    # never the raw XML (which would dump the whole subagent result into the row).
+    # The finished subagent's own live line needs no explicit drop here: the
+    # viewer hides subagent lines once this turn's op stops running.
+    if [[ $prompt == *'<task-notification>'* ]]; then
+      sm=${prompt#*<summary>}; sm=${sm%%</summary>*}
+      [[ $sm == "$prompt" || -z $sm ]] && sm="background agent finished"
+      prompt=$sm
+    fi
     _joystick_redact "$prompt"; prompt=$REPLY
     # Which Ghostty surface is this session in? The user just typed a prompt,
     # so the focused surface is ours. Cached per session id.
@@ -214,12 +225,14 @@ case $event in
     fi
     ;;
   PreToolUse)
-    # A subagent (Task) runs long, but PostToolUse fires only when it FINISHES —
-    # so without this the row would sit dead at "working" for the whole run.
+    # A subagent (Task) runs long and in the BACKGROUND: its tool call returns at
+    # dispatch, so PostToolUse can't mark it finished (it fires immediately too).
     # Emit a live subagent line at the START of each Task/Agent, keyed by the
     # tool_use_id, so several CONCURRENT subagents each show their own line under
-    # the session row (the matching PostToolUse drops that exact line). Scoped to
-    # Task/Agent on purpose: other tools complete fast enough that their
+    # the session row. The line clears when the turn ends (the viewer hides
+    # subagent lines once the op stops running); a <task-notification> in
+    # UserPromptSubmit marks completion for subagents that outlive the turn.
+    # Scoped to Task/Agent on purpose: other tools complete fast enough that their
     # PostToolUse subtitle is timely, and emitting here for all would double events.
     tool=$(jq -r '.tool_name // empty' <<<"$input")
     case $tool in
@@ -236,23 +249,13 @@ case $event in
     # waiting state. Fires on every tool use (async hook), so keep it cheap.
     rm -f "${LOG:h}/waiting-$sid"
     tool=$(jq -r '.tool_name // empty' <<<"$input")
-    # A finishing subagent (Task) drops its OWN live line, keyed by the same
-    # tool_use_id its PreToolUse start used — so the right line goes, not whichever
-    # was latest. With no tool_use_id (older Claude Code) fall back to the old
-    # latest-wins subtitle so behaviour degrades gracefully.
-    if [[ $tool == Task || $tool == Agent ]]; then
-      sub=$(jq -r '.tool_use_id // empty' <<<"$input")
-      if [[ -n $sub ]]; then
-        jq -cn --arg id "$id" --arg sub "$sub" --argjson ts "$now" \
-          '{v:1,ev:"active",id:$id,sub:$sub,subdone:true,ts:$ts}' >> "$LOG"
-      else
-        d=$(jq -r '.tool_input.description // .tool_input.subagent_type // ""' <<<"$input")
-        _joystick_redact "Task: $d"; act=${REPLY[1,120]}
-        jq -cn --arg id "$id" --arg act "$act" --argjson ts "$now" \
-          '{v:1,ev:"active",id:$id,act:$act,ts:$ts}' >> "$LOG"
-      fi
-      exit 0
-    fi
+    # A Task/Agent's PostToolUse fires at DISPATCH, not completion — subagents run
+    # in the background and report finishing later via a <task-notification>
+    # (handled in UserPromptSubmit). So nothing to do here: the PreToolUse START
+    # line already shows the subagent, and it clears when this turn ends (the
+    # viewer hides subagent lines once the op stops running). Emitting `subdone`
+    # here was the bug that made subagent lines vanish the instant they appeared.
+    [[ $tool == Task || $tool == Agent ]] && exit 0
     case $tool in
       Bash)       d=$(jq -r '.tool_input.command // ""' <<<"$input"); act="Bash: $d" ;;
       Edit|Write|Read|MultiEdit|NotebookEdit)
@@ -273,8 +276,10 @@ case $event in
     # A tool errored — surface it as the live activity so the row shows trouble.
     tool=$(jq -r '.tool_name // empty' <<<"$input")
     [[ -n $tool ]] || exit 0
-    # A failed subagent also drops its live line (same key as its start), so a
-    # crashed Task doesn't leave a line hanging under the row forever.
+    # A Task that fails to LAUNCH (a dispatch-level error — the subagent never
+    # ran) drops its live line, keyed by the same tool_use_id its start used, so
+    # it doesn't hang under the row. (A subagent that runs and then fails reports
+    # via a <task-notification>, not here.)
     if [[ $tool == Task || $tool == Agent ]]; then
       sub=$(jq -r '.tool_use_id // empty' <<<"$input")
       [[ -n $sub ]] && jq -cn --arg id "$id" --arg sub "$sub" --argjson ts "$now" \
