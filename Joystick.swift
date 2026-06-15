@@ -88,6 +88,10 @@ struct SessionMeta { var title = ""; var model = ""; var mode = ""; var ctx: Dou
 // Outcome of running the in-app setup (install.sh).
 enum SetupResult: Equatable { case ok, failed(String) }
 
+// Apple Events permission to control Ghostty (drives click-to-focus). .denied
+// means the user said no (or it's off in Privacy settings) — we surface a banner.
+enum AutomationStatus { case granted, denied, notDetermined, unknown }
+
 // MARK: - Store
 
 @MainActor
@@ -106,6 +110,7 @@ final class Store: ObservableObject {
     @Published var claudeWired = false
     @Published var isSettingUp = false
     @Published var setupResult: SetupResult? = nil
+    @Published var automation: AutomationStatus = .unknown
     var needsSetup: Bool { !shellWired || !claudeWired }
     // Show the onboarding banner while unwired, and briefly after a successful
     // run (to show the "open a new terminal" nudge until dismissed).
@@ -197,6 +202,7 @@ final class Store: ObservableObject {
         commandsToday = UserDefaults.standard.integer(forKey: "commandsToday")
         tallyDayStart = UserDefaults.standard.double(forKey: "tallyDayStart")
         refreshWiring()
+        refreshAutomation()
         reload()
         // Watch the log instead of polling it: near-instant pickup of new
         // sessions and state changes, and ~zero wakeups while the log is quiet.
@@ -277,6 +283,12 @@ final class Store: ObservableObject {
         guard FileManager.default.fileExists(atPath: installer) else {
             setupResult = .failed("Installer missing from app bundle"); return
         }
+        // install.sh needs jq to merge the Claude hooks. Check up front so we
+        // give a clear message instead of a partial wiring + cryptic failure.
+        // (The Homebrew cask also declares depends_on jq, covering brew installs.)
+        guard Self.jqPath() != nil else {
+            setupResult = .failed("jq is required. Install it with:  brew install jq"); return
+        }
         isSettingUp = true
         setupResult = nil
         DispatchQueue.global(qos: .userInitiated).async {
@@ -304,6 +316,10 @@ final class Store: ObservableObject {
                 self.refreshWiring()
                 if code == 0 && !self.needsSetup {
                     self.setupResult = .ok
+                    // Hooks are wired — ask for Ghostty automation now, so the first
+                    // click-to-focus isn't a surprise system prompt later.
+                    _ = self.ghosttyAutomation(prompt: true)
+                    self.refreshAutomation()
                 } else {
                     let last = output.split(whereSeparator: \.isNewline).last.map(String.init)
                     self.setupResult = .failed(last ?? "Setup failed — check that jq is installed")
@@ -311,6 +327,29 @@ final class Store: ObservableObject {
             }
         }
     }
+
+    // First jq on the likely PATHs (Finder-launched apps don't inherit the shell's).
+    nonisolated static func jqPath() -> String? {
+        ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+            .map { $0 + "/jq" }
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    // Whether we're allowed to send Apple Events to Ghostty (click-to-focus).
+    // prompt=false reports status silently; prompt=true shows the one-time
+    // consent dialog when undetermined. .unknown covers "Ghostty not running".
+    @discardableResult
+    func ghosttyAutomation(prompt: Bool) -> AutomationStatus {
+        let target = NSAppleEventDescriptor(bundleIdentifier: "com.mitchellh.ghostty")
+        guard let desc = target.aeDesc else { return .unknown }
+        let status = AEDeterminePermissionToAutomateTarget(desc, typeWildCard, typeWildCard, prompt)
+        if status == noErr { return .granted }
+        if status == OSStatus(errAEEventNotPermitted) { return .denied }
+        if status == OSStatus(errAEEventWouldRequireUserConsent) { return .notDetermined }
+        return .unknown   // procNotFound (Ghostty not running), etc.
+    }
+
+    func refreshAutomation() { automation = ghosttyAutomation(prompt: false) }
 
     // Make the focused-tab highlight responsive without a perpetual poll. The
     // instant Ghostty becomes frontmost we sample immediately (switching INTO
@@ -1416,6 +1455,33 @@ struct SetupBanner: View {
     }
 }
 
+// Shown when macOS automation permission to control Ghostty has been denied —
+// without it, click-to-focus (the core feature) silently does nothing. Deep-links
+// to the exact Privacy pane so the user can flip it back on.
+struct PermissionBanner: View {
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Can't control Ghostty").font(.callout.weight(.semibold))
+                Text("Click-to-focus needs Automation permission.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Button("Open Settings") {
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            .controlSize(.small)
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.orange.opacity(0.12)))
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var store: Store
     @Environment(\.openWindow) private var openWindow
@@ -1440,6 +1506,9 @@ struct ContentView: View {
             if store.showSetupBanner {
                 SetupBanner(store: store)
             }
+            if store.automation == .denied {
+                PermissionBanner()
+            }
             opList
             if keyboardNav {
                 Divider()
@@ -1449,6 +1518,7 @@ struct ContentView: View {
         .frame(minWidth: 400, minHeight: 320)
         .onAppear {
             store.refreshWiring()
+            store.refreshAutomation()
             store.reload()
             // Apply the default pin state — onChange only fires on a *change*,
             // so without this the toggle would read "on" while windows stayed
