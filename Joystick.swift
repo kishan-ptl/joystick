@@ -885,17 +885,38 @@ final class Store: ObservableObject {
             // events written before the kind field existed.
             let kind = e.kind ?? (e.tty == "claude" ? "claude"
                                   : e.tty == "cli" ? "external" : "shell")
+            // Out-of-order guard (Claude turns share one id across turns): a queued
+            // or auto-injected prompt's `start` can land in the log just BEFORE the
+            // prior turn's `end`. The Stop handler is slow — it reads the transcript
+            // for the closing blurb — while UserPromptSubmit, with surface+pid
+            // cached, is fast, so the new start overtakes the pending end. If we
+            // still hold an open op for this id, the prior turn ended but its end
+            // hasn't folded yet: close it out now so it survives as history, rather
+            // than let the late end (dropped below) swallow this NEW turn's op and
+            // freeze the new prompt as a finished row. See NOTES.md.
+            if kind == "claude", var prev = parsedOpen[e.id] {
+                prev.endTs = e.ts
+                prev.dur = max(0, e.ts - prev.start)
+                prev.exitCode = 0
+                parsedDone.append(prev)
+            }
             parsedOpen[e.id] = Op(key: e.id, cmd: e.cmd ?? "?", cwd: e.cwd ?? "",
                                   tty: e.tty ?? "", surface: e.surface ?? "", kind: kind,
                                   pid: e.pid ?? -1, start: e.ts)
         case "end":
-            if var op = parsedOpen.removeValue(forKey: e.id) {
-                op.endTs = e.ts
-                op.exitCode = e.exit ?? 0
-                op.dur = e.dur ?? max(0, e.ts - op.start)
-                op.summary = e.msg        // Claude's closing blurb (claude turns only)
-                parsedDone.append(op)
-            }
+            guard var op = parsedOpen[e.id] else { break }
+            // Drop a stale end whose turn the open op has already superseded. An end
+            // closes the turn that began at (ts − dur); the emitter derives both
+            // from the same integer-second clock, so for the matching turn that
+            // equals op.start exactly. A strictly-later open op is a newer turn (the
+            // queued-prompt race above) — leave it live, don't close it.
+            if op.isClaude, let dur = e.dur, op.start > e.ts - dur { break }
+            parsedOpen.removeValue(forKey: e.id)
+            op.endTs = e.ts
+            op.exitCode = e.exit ?? 0
+            op.dur = e.dur ?? max(0, e.ts - op.start)
+            op.summary = e.msg        // Claude's closing blurb (claude turns only)
+            parsedDone.append(op)
         case "waiting":
             if var op = parsedOpen[e.id] {
                 op.waitingSince = e.ts
