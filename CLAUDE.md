@@ -28,7 +28,8 @@ shared state and doubles as the future integration API.
   (`MenuBarExtra`) and the window. The window is **keyboard-first**: a global
   hotkey (`⌥⌘J`, Carbon `RegisterEventHotKey`) summons/toggles it, and ↑↓ / ⏎ /
   ⌘1–9 / type-to-filter drive a stable, first-seen flat list
-  (newest on top, slot order persisted) — while the menubar popover keeps the
+  (newest on top, slot order persisted; reorder it by hand with ⌘↑/⌘↓ or the
+  row's right-click "Move up/down") — while the menubar popover keeps the
   prioritized waiting-on-top sort. The window's fixed order is deliberate, not a
   regression of the sort; see NOTES.md "Keyboard-first window (2026-06-14)".
   (A SwiftBar python plugin was the original menubar; retired 2026-06-13 —
