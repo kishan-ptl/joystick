@@ -156,6 +156,23 @@ struct EventFoldTests {
                   f.open["claude-old"] == nil && f.open["claude-new"]?.isRunning == true && f.done.isEmpty)
         }
 
+        // 14. `reset` (emitted on /clear/resume/compact, before any prompt) retires the
+        //     prior session's row NOW, by pid — so the cleared terminal doesn't keep
+        //     showing the old conversation until the first prompt. The id in the reset is
+        //     the NEW sid; the prior turn (different sid, same pid) is dropped. A bystander
+        //     session in another tab (different pid) survives.
+        do {
+            var f = EventFold()
+            f.apply(ev(#"{"kind":"claude","ev":"start","id":"claude-old","cmd":"» how important is 1?","surface":"S","pid":42,"ts":100}"#))
+            f.apply(ev(#"{"ev":"end","id":"claude-old","exit":0,"dur":5,"ts":105,"msg":"bye"}"#))
+            f.apply(ev(#"{"kind":"claude","ev":"start","id":"claude-other","cmd":"» elsewhere","surface":"T","pid":99,"ts":106}"#))
+            // /clear rotated the sid; SessionStart emits a reset on the same pid, no prompt yet.
+            f.apply(ev(#"{"ev":"reset","id":"claude-new","pid":42,"ts":200}"#))
+            check("reset retires the cleared session's finished row", !f.done.contains { $0.key == "claude-old" })
+            check("reset opens no new op (no prompt yet)", f.open["claude-new"] == nil)
+            check("reset leaves the bystander tab untouched", f.open["claude-other"]?.isRunning == true)
+        }
+
         // --- the two former landmines, now fixed ---
 
         // L1. Op.id must be unique per op even when same-session turns share an integer

@@ -135,17 +135,11 @@ struct EventFold {
             // with the new session. A Ghostty surface hosts exactly one live claude
             // process, so when a NEW claude session starts on a surface (or pid) an
             // earlier one held, that earlier session is gone: retire its ops (open
-            // and recent history alike). Match on surface (the terminal) or pid (the
-            // process), whichever the new start carries — never the same id, which is
-            // the queued-prompt case handled just below. See NOTES.md.
+            // and recent history alike). Never the same id — that's the queued-prompt
+            // case handled just below. (A `reset` event does the same retirement at
+            // /clear time, before the first prompt — see that case.) See NOTES.md.
             if kind == "claude" {
-                let surface = e.surface ?? "", pid = e.pid ?? -1
-                func superseded(_ op: Op) -> Bool {
-                    op.isClaude && op.key != e.id
-                        && ((!surface.isEmpty && op.surface == surface) || (pid > 0 && op.pid == pid))
-                }
-                open = open.filter { !superseded($0.value) }
-                done.removeAll(where: superseded)
+                retireSuperseded(byId: e.id, surface: e.surface ?? "", pid: e.pid ?? -1)
             }
             // Out-of-order guard (Claude turns share one id across turns): a queued
             // or auto-injected prompt's `start` can land in the log just BEFORE the
@@ -215,9 +209,35 @@ struct EventFold {
                                      mode: e.mode ?? "", ctx: e.ctx ?? 0,
                                      name: e.name ?? "", color: e.color ?? "",
                                      wt: e.wt ?? "")
+        case "reset":
+            // A new Claude session took over this terminal — /clear, /resume and
+            // /compact each rotate to a new claude-<sid> on the SAME claude process
+            // — but no prompt has been submitted yet, so there's no `start` to carry
+            // the supersede. The emitter fires this on SessionStart so the cleared
+            // row retires NOW, instead of lingering on the old conversation until your
+            // first prompt. Same retirement as `start`; pid carries the match (the
+            // claude process is unchanged across the rotation, and no two live
+            // processes share a pid). See NOTES.md.
+            retireSuperseded(byId: e.id, surface: e.surface ?? "", pid: e.pid ?? -1)
         default:
             break
         }
+    }
+
+    // Retire any Claude op an EARLIER session held on this surface or pid: a new
+    // session has taken the terminal, so the old one is gone — drop its ops from
+    // both `open` and `done`. Shared by `start` (the first prompt of the new
+    // session) and `reset` (the session rotated via /clear etc., before any
+    // prompt). Never matches the same id (the queued-prompt case, handled in
+    // `start`). Surface is the normal match; pid is the airtight fallback when
+    // surface capture missed (live processes don't share pids).
+    private mutating func retireSuperseded(byId id: String, surface: String, pid: Int32) {
+        func superseded(_ op: Op) -> Bool {
+            op.isClaude && op.key != id
+                && ((!surface.isEmpty && op.surface == surface) || (pid > 0 && op.pid == pid))
+        }
+        open = open.filter { !superseded($0.value) }
+        done.removeAll(where: superseded)
     }
 
     // Cap the retained finished ops (oldest dropped); the incremental parse only

@@ -274,6 +274,20 @@ old finished turn retires when the new session takes the surface) — correct pe
 the mirror principle (the row reflects what the terminal is doing now). It does
 NOT touch the claude→shell-command-in-the-same-tab case (different group keys).
 
+Follow-up — clear at /clear time, not the first prompt (2026-06-15): the fix above
+retires the orphan only when the NEW turn's `start` arrives, so between `/clear` and
+your first prompt the row still shows the old conversation for a beat. `/clear` fires
+no `Stop` (confirmed in the hooks docs) — its only signal is `SessionStart` (source
+`clear`/`resume`/`compact`, all of which rotate the sid on the SAME claude process).
+So the hook now emits a tiny `reset` event there carrying the new id + the (unchanged)
+claude pid, and `EventFold.apply` gained a `case "reset"` that runs the very same
+supersede retirement — by pid, which is airtight across the rotation. No new op opens
+(no prompt yet), so the terminal just goes blank like a fresh `claude`, immediately.
+`startup` is skipped (a fresh process has nothing to retire). The supersede block was
+lifted into a shared `retireSuperseded` helper so `start` and `reset` can't drift.
+Covered by eventfold test 14. (Exit-then-restart still clears on the first prompt, not
+instantly — that's a new process, so no pid match at SessionStart; acceptable.)
+
 ## Roadmap
 
 ### v0.1 — shareable (1–2 weekends)
