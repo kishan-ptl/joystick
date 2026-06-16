@@ -481,10 +481,11 @@ final class Store: ObservableObject {
                 g.current.sessionName = m.name; g.current.agentColor = m.color
                 g.current.worktree = m.wt
             }
-            // Background shells are session-scoped and outlive the launching turn, so
-            // attach them whatever the current op's state (a running turn, or an idle
-            // one whose shells are still going).
+            // Background shells and subagents are session-scoped and outlive the
+            // launching turn, so attach them whatever the current op's state (a running
+            // turn, or a done one whose shells/agents are still going).
             g.current.bgShells = fold.bgShells[g.key] ?? []
+            g.current.liveSubagents = fold.subagents[g.key] ?? []
             return g
         }
         activeGroups = active.map(withMeta)
@@ -1300,6 +1301,13 @@ struct OpRow: View {
         if !op.bgShells.isEmpty {
             parts.append(Text("▷ \(op.bgShells.count) shell\(op.bgShells.count == 1 ? "" : "s")"))
         }
+        // Subagents that outlived the turn: while the turn runs they show inline (⚙)
+        // above, but once it's marked done a still-running agent gets its own "⟳ N bg"
+        // chip — the row stays truthful that the session is still working (the TUI's
+        // "Waiting for N background agents to finish"). Commands list beneath the row.
+        if !op.isRunning, !op.liveSubagents.isEmpty {
+            parts.append(Text("⟳ \(op.liveSubagents.count) bg"))
+        }
         parts.append(Text(tilde(op.cwd)))
         if !op.tty.isEmpty { parts.append(Text(op.tty)) }
         if let code = op.exitCode, code != 0 {
@@ -1428,11 +1436,13 @@ struct GroupRow: View {
             }
             OpRow(op: group.current, nowTs: nowTs,
                   jumpNumber: jumpNumber, showJumpSlot: keyboardNav)
-            // Live subagent fan-out: when a turn runs 2+ Tasks at once, list each
-            // beneath the row (the main line shows the count). ≤3 shown, like the
+            // Live subagent fan-out: list each Task beneath the row (the main line
+            // shows the count/chip). Shown for a running fan-out (2+ at once) OR for a
+            // subagent still running after the turn was marked done (the ⟳ bg case) —
+            // there the single agent's label only lives here. ≤3 shown, like the
             // history below; the rest fold into "+N more" so the row stays bounded.
-            if group.current.isRunning, group.current.liveSubagents.count >= 2 {
-                let kids = group.current.liveSubagents
+            let kids = group.current.liveSubagents
+            if kids.count >= 2 || (!group.current.isRunning && !kids.isEmpty) {
                 ForEach(kids.prefix(3)) { kid in
                     HStack(spacing: 0) {
                         Spacer().frame(width: 43)  // align under the command text

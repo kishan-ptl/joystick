@@ -79,22 +79,36 @@ drop_shell() {
     '{v:1,ev:"active",id:$id,shell:$sh,subdone:true,ts:$ts}' >> "$LOG"
 }
 
-# Drain any background shells that FINISHED — scan the transcript for the
-# tool_use_ids carried by completion <task-notification>s and drop each (marker
-# guards against double-drop). This is what catches shells that finished mid-turn,
+# Drop one tracked subagent (emit its `subdone`) — the Task analogue of drop_shell,
+# keyed by `sub` (the Task tool_use_id) instead of `shell`, and marker-guarded the
+# same way for exactly-once across the two completion paths. A subagent is now
+# session-scoped too: when its turn is marked done while it runs on (the TUI's
+# "Waiting for N background agents to finish"), this is what eventually clears the
+# row's "⟳ bg" chip. $1 = the Task's tool_use_id.
+drop_agent() {
+  local mk="${LOG:h}/jagent-$sid-$1"
+  [[ -n $1 && -e $mk ]] || return 0
+  rm -f "$mk"
+  jq -cn --arg id "$id" --arg sub "$1" --argjson ts "$now" \
+    '{v:1,ev:"active",id:$id,sub:$sub,subdone:true,ts:$ts}' >> "$LOG"
+}
+
+# Drain background work (shells AND subagents) that FINISHED — scan the transcript
+# for the tool_use_ids carried by completion <task-notification>s and drop each
+# (markers guard against double-drop). This catches work that finished mid-turn,
 # whose notification never arrived as its own UserPromptSubmit. $1 = transcript path.
-drain_finished_shells() {
+drain_finished_bg() {
   [[ -n $1 && -f $1 ]] || return 0
-  # Cheap gate: do nothing unless this session actually has an open shell. The
-  # marker glob is a stat, not a transcript read — so the overwhelmingly common
-  # case (a turn with no background shells) pays nothing, and the scan below only
-  # runs while shells are genuinely in flight.
+  # Cheap gate: do nothing unless this session actually has an open shell or agent.
+  # The marker glob is a stat, not a transcript read — so the overwhelmingly common
+  # case (a turn with no background work) pays nothing, and the scan below only runs
+  # while shells/agents are genuinely in flight.
   setopt local_options nullglob
-  local markers=("${LOG:h}/jshell-$sid-"*)
+  local markers=("${LOG:h}/jshell-$sid-"* "${LOG:h}/jagent-$sid-"*)
   (( ${#markers} )) || return 0
   tail -n 1200 "$1" 2>/dev/null | grep -F '<task-notification>' \
     | grep -oE 'tool-use-id>toolu_[A-Za-z0-9]+' | sed 's/.*>//' | sort -u \
-    | while read -r tuid; do drop_shell "$tuid"; done
+    | while read -r tuid; do drop_shell "$tuid"; drop_agent "$tuid"; done
 }
 
 # Close this session's open turn (if any) with the given exit code. Decides
@@ -122,9 +136,10 @@ close_turn() {  # $1 = exit code  $2 = notify title  $3 = notify verb
   # no end_turn shows (a turn that ended on a tool call). Then flatten to one
   # line + redact + cap like every free-text field (< PIPE_BUF, no secrets).
   tpath=$(claude_transcript)
-  # Drain background shells that finished during this turn (including mid-turn
-  # completions, whose notification never fired its own UserPromptSubmit drop).
-  drain_finished_shells "$tpath"
+  # Drain background work (shells + subagents) that finished during this turn,
+  # including mid-turn completions whose notification never fired its own
+  # UserPromptSubmit drop.
+  drain_finished_bg "$tpath"
   if [[ $1 == 0 && -n $tpath ]]; then
     local tries=0
     while (( tries < 15 )); do
@@ -219,16 +234,15 @@ case $event in
     # <task-notification> — not something you typed. Keep it as a turn (the
     # session IS working again) but label it from the notification's <summary>,
     # never the raw XML (which would dump the whole subagent result into the row).
-    # The finished subagent's own live line needs no explicit drop here: the
-    # viewer hides subagent lines once this turn's op stops running.
     if [[ $prompt == *'<task-notification>'* ]]; then
-      # A background shell (or a subagent) finished and woke the session. Drop the
-      # live shell line for every tool_use_id the notification(s) carry — marker-
-      # guarded, so a subagent's id (untracked) is a no-op. This is the fast path
-      # (idle completion → its own turn); mid-turn completions are caught instead
-      # by the Stop-time drain. Emitted BEFORE the turn's start so it clears first.
+      # A background shell OR subagent finished and woke the session. Drop the live
+      # line for every tool_use_id the notification(s) carry — drop_shell and
+      # drop_agent are each marker-guarded, so exactly the one that matches fires and
+      # the other is a no-op. This is the fast path (idle completion → its own turn);
+      # mid-turn completions are caught by the Stop-time drain. Emitted BEFORE the
+      # turn's start so the finished line clears first.
       print -r -- "$prompt" | grep -oE 'tool-use-id>toolu_[A-Za-z0-9]+' | sed 's/.*>//' \
-        | while read -r tuid; do drop_shell "$tuid"; done
+        | while read -r tuid; do drop_shell "$tuid"; drop_agent "$tuid"; done
       sm=${prompt#*<summary>}; sm=${sm%%</summary>*}
       [[ $sm == "$prompt" || -z $sm ]] && sm="background agent finished"
       prompt=$sm
@@ -293,12 +307,13 @@ case $event in
     # A subagent (Task) runs long and in the BACKGROUND: its tool call returns at
     # dispatch, so PostToolUse can't mark it finished (it fires immediately too).
     # Emit a live subagent line at the START of each Task/Agent, keyed by the
-    # tool_use_id, so several CONCURRENT subagents each show their own line under
-    # the session row. The line clears when the turn ends (the viewer hides
-    # subagent lines once the op stops running); a <task-notification> in
-    # UserPromptSubmit marks completion for subagents that outlive the turn.
-    # Scoped to Task/Agent on purpose: other tools complete fast enough that their
-    # PostToolUse subtitle is timely, and emitting here for all would double events.
+    # tool_use_id, so several CONCURRENT subagents each show their own line under the
+    # session row, and drop a per-agent marker so its completion drops it exactly
+    # once. The line is SESSION-scoped (like a bg shell): it survives the turn's
+    # Stop, so a subagent that outlives its turn keeps the row's "⟳ bg" chip lit
+    # until it reports back — via a <task-notification> (its own UserPromptSubmit, or
+    # the Stop-time drain for completions that landed mid-turn). Scoped to Task/Agent
+    # on purpose: other tools complete fast enough that their PostToolUse is timely.
     tool=$(jq -r '.tool_name // empty' <<<"$input")
     case $tool in
       Task|Agent) d=$(jq -r '.tool_input.description // .tool_input.subagent_type // ""' <<<"$input") ;;
@@ -308,6 +323,7 @@ case $event in
     _joystick_redact "Task: $d"; act=${REPLY[1,120]}   # redact secrets; keep line < PIPE_BUF
     jq -cn --arg id "$id" --arg act "$act" --arg sub "$sub" --argjson ts "$now" \
       '{v:1,ev:"active",id:$id,act:$act,sub:$sub,ts:$ts}' >> "$LOG"
+    [[ -n $sub ]] && : > "${LOG:h}/jagent-$sid-$sub"   # mark it open so the drain/notification drops it exactly once
     ;;
   PostToolUse)
     # Surface the tool just used as the live activity subtitle, and clear any
@@ -359,13 +375,12 @@ case $event in
     tool=$(jq -r '.tool_name // empty' <<<"$input")
     [[ -n $tool ]] || exit 0
     # A Task that fails to LAUNCH (a dispatch-level error — the subagent never
-    # ran) drops its live line, keyed by the same tool_use_id its start used, so
-    # it doesn't hang under the row. (A subagent that runs and then fails reports
+    # ran) drops its live line via drop_agent, keyed by the same tool_use_id its
+    # start used (the PreToolUse marker still exists), so it doesn't hang under the
+    # row and its marker is cleaned. (A subagent that runs and then fails reports
     # via a <task-notification>, not here.)
     if [[ $tool == Task || $tool == Agent ]]; then
-      sub=$(jq -r '.tool_use_id // empty' <<<"$input")
-      [[ -n $sub ]] && jq -cn --arg id "$id" --arg sub "$sub" --argjson ts "$now" \
-        '{v:1,ev:"active",id:$id,sub:$sub,subdone:true,ts:$ts}' >> "$LOG"
+      drop_agent "$(jq -r '.tool_use_id // empty' <<<"$input")"
     fi
     jq -cn --arg id "$id" --arg act "⚠ $tool failed" --argjson ts "$now" \
       '{v:1,ev:"active",id:$id,act:$act,ts:$ts}' >> "$LOG"

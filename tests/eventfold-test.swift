@@ -73,15 +73,27 @@ struct EventFoldTests {
             check("stale end ignored, op stays open", f.open["claude-x"]?.isRunning == true && f.done.isEmpty)
         }
 
-        // 7. concurrent subagents each get a live line; subdone drops one
+        // 7. concurrent subagents each get a live line; subdone drops one. Subagents are
+        //    SESSION-scoped (like bg shells) so they SURVIVE the turn that launched them —
+        //    the row stays marked-done with a "⟳ bg" chip while an agent runs on.
         do {
             var f = EventFold()
             f.apply(ev(#"{"kind":"claude","ev":"start","id":"claude-x","cmd":"» go","ts":100}"#))
             f.apply(ev(#"{"ev":"active","id":"claude-x","act":"Task: A","sub":"tu1","ts":101}"#))
             f.apply(ev(#"{"ev":"active","id":"claude-x","act":"Task: B","sub":"tu2","ts":102}"#))
-            check("two concurrent subagents tracked", f.open["claude-x"]?.liveSubagents.count == 2)
+            check("two concurrent subagents tracked", f.subagents["claude-x"]?.count == 2)
+            check("subagents are NOT stored on the per-turn op", f.open["claude-x"]?.liveSubagents.isEmpty == true)
             f.apply(ev(#"{"ev":"active","id":"claude-x","sub":"tu1","subdone":true,"ts":103}"#))
-            check("subdone drops one subagent", f.open["claude-x"]?.liveSubagents.map(\.id) == ["tu2"])
+            check("subdone drops one subagent", f.subagents["claude-x"]?.map(\.id) == ["tu2"])
+            // The launching turn ends, but the remaining subagent runs on (the bug fix:
+            // before this, the row went ✓ done and the agent vanished from the board).
+            f.apply(ev(#"{"ev":"end","id":"claude-x","exit":0,"dur":3,"ts":104}"#))
+            check("subagent survives the turn end", f.subagents["claude-x"]?.map(\.id) == ["tu2"])
+            // Its completion notification drops the last one; reset clears the rest.
+            f.apply(ev(#"{"ev":"active","id":"claude-x","sub":"tu2","subdone":true,"ts":105}"#))
+            check("last subagent subdone clears it", f.subagents["claude-x"]?.isEmpty ?? true)
+            f.reset()
+            check("reset clears subagents", f.subagents.isEmpty)
         }
 
         // 7b. background shells (run_in_background): session-scoped, OUTLIVE the turn,

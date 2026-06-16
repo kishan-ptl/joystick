@@ -63,8 +63,8 @@ struct Op: Identifiable {
     var waitingSince: Double? = nil   // explicit waiting event (Claude hooks)
     var waitingMsg: String? = nil
     var activity: String? = nil       // live: tool the agent is currently using (Claude)
-    var liveSubagents: [LiveChild] = []  // live: subagents (Task) running this turn, in start order
-    var bgShells: [LiveChild] = []       // live: background shells (run_in_background) for this session; attached at render time from EventFold.bgShells. They OUTLIVE the turn that launched them, so unlike liveSubagents they're session-scoped, not per-op.
+    var liveSubagents: [LiveChild] = []  // live: subagents (Task) for this session; attached at render time from EventFold.subagents. Session-scoped (like bgShells) — a subagent can OUTLIVE the turn that launched it (the row is marked done while it runs on), so it's not stored on the per-turn Op.
+    var bgShells: [LiveChild] = []       // live: background shells (run_in_background) for this session; attached at render time from EventFold.bgShells. They OUTLIVE the turn that launched them, so like liveSubagents they're session-scoped, not per-op.
     var stallIdle: Double? = nil      // heuristic: tty quiet + fg proc asleep
     var isService = false             // fg process group holds a listening port
     var unseen = false                // finished, and surface not viewed since
@@ -112,7 +112,8 @@ struct EventFold {
     private(set) var open: [String: Op] = [:]    // id -> currently-open op
     private(set) var done: [Op] = []             // finished ops, oldest first (tail-capped)
     private(set) var meta: [String: SessionMeta] = [:]  // claude-<sid> -> session metadata
-    private(set) var bgShells: [String: [LiveChild]] = [:]  // claude-<sid> -> live background shells (run_in_background). Session-scoped, NOT per-op: a bg shell outlives the turn that launched it, so it can't ride along on a turn's Op the way liveSubagents do.
+    private(set) var bgShells: [String: [LiveChild]] = [:]  // claude-<sid> -> live background shells (run_in_background). Session-scoped, NOT per-op: a bg shell outlives the turn that launched it, so it can't ride along on a turn's Op.
+    private(set) var subagents: [String: [LiveChild]] = [:]  // claude-<sid> -> live subagents (Task). Session-scoped like bgShells: a subagent can outlive the turn that launched it (the row is marked done while the agent runs on — the TUI's "Waiting for N background agents to finish"), so it can't ride on a turn's Op either.
     private var nextSeq = 0                              // monotonic id source for Op.seq
 
     static let maxDoneRetained = 2000   // incremental parse accumulates; cap retained finished ops
@@ -188,12 +189,13 @@ struct EventFold {
                 open[e.id] = op
             }
         case "active":
-            // A background shell (run_in_background Bash) is tracked at SESSION level,
-            // not on the turn's op: it keeps running across many turns (often after the
-            // launching turn has long since ended), so it can't live on a per-turn Op the
-            // way a subagent does. Keyed by the Bash tool_use_id; added on start (the
-            // PostToolUse), dropped on finish (the <task-notification>, which carries the
-            // same id). Independent of whether an op is currently open for this session.
+            // Background shells (run_in_background Bash) AND subagents (Task) are both
+            // tracked at SESSION level, not on the turn's op: each can outlive the turn
+            // that launched it — a bg shell runs across many turns, and a subagent the
+            // row already marked done is still running (the TUI's "Waiting for N
+            // background agents to finish"). Keyed by tool_use_id; added on start,
+            // dropped on finish (the <task-notification> carries the same id). Both are
+            // independent of whether an op is currently open for this session.
             if let sh = e.shell, !sh.isEmpty {
                 bgShells[e.id, default: []].removeAll { $0.id == sh }
                 if e.subdone != true {
@@ -201,20 +203,22 @@ struct EventFold {
                 }
                 break
             }
+            if let sub = e.sub, !sub.isEmpty {
+                // A tracked subagent (Task): add on start, drop on finish, so concurrent
+                // subagents each get their own live line under the session row instead of
+                // overwriting one latest-wins activity. A launch/finish also means the
+                // session is unblocked, so clear any waiting on a still-open op.
+                subagents[e.id, default: []].removeAll { $0.id == sub }
+                if e.subdone != true {
+                    subagents[e.id, default: []].append(LiveChild(id: sub, label: e.act ?? "Task"))
+                }
+                if var op = open[e.id] { op.waitingSince = nil; op.waitingMsg = nil; open[e.id] = op }
+                break
+            }
             if var op = open[e.id] {
                 op.waitingSince = nil
                 op.waitingMsg = nil
-                if let sub = e.sub, !sub.isEmpty {
-                    // A tracked subagent (Task): add on start, drop on finish, so
-                    // concurrent subagents each get their own live line under the
-                    // session row instead of overwriting one latest-wins activity.
-                    op.liveSubagents.removeAll { $0.id == sub }
-                    if e.subdone != true {
-                        op.liveSubagents.append(LiveChild(id: sub, label: e.act ?? "Task"))
-                    }
-                } else {
-                    op.activity = e.act    // live "what it's doing now" (non-Task tools)
-                }
+                op.activity = e.act    // live "what it's doing now" (non-Task tools)
                 open[e.id] = op
             }
         case "meta":
@@ -252,11 +256,12 @@ struct EventFold {
             op.isClaude && op.key != id
                 && ((!surface.isEmpty && op.surface == surface) || (pid > 0 && op.pid == pid))
         }
-        // Drop the retired session's bg shells too, so a shell whose completion
-        // notification never arrives (session killed mid-run) doesn't orphan a line.
+        // Drop the retired session's bg shells and subagents too, so any whose
+        // completion notification never arrives (session killed mid-run) don't
+        // orphan a line.
         let retiredIds = Set(open.values.filter(superseded).map(\.key))
             .union(done.filter(superseded).map(\.key))
-        for rid in retiredIds { bgShells.removeValue(forKey: rid) }
+        for rid in retiredIds { bgShells.removeValue(forKey: rid); subagents.removeValue(forKey: rid) }
         open = open.filter { !superseded($0.value) }
         done.removeAll(where: superseded)
     }
@@ -279,7 +284,7 @@ struct EventFold {
     // Forget everything — used on rotation/truncation and on the 4am day rollover,
     // both of which force a full re-read from the top of the log.
     mutating func reset() {
-        open = [:]; done = []; meta = [:]; bgShells = [:]; nextSeq = 0
+        open = [:]; done = []; meta = [:]; bgShells = [:]; subagents = [:]; nextSeq = 0
     }
 
     // MARK: Tally helpers (pure; Store owns the @Published counter + persistence)
