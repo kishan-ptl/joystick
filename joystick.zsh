@@ -26,10 +26,48 @@ unset _joystick_dir
 #   JOYSTICK_NOLOG_DIRS=(~/secrets ~/work/client-x)  — never log in these trees
 #   JOYSTICK_LOG_MODE=head — log only "cmd subcommand", never arguments
 
+# Rotate the log when it outgrows the cap: keep the most recent $keep lines, but
+# NEVER drop the `start` line of an op that's still open (a start with no matching
+# end). A blind `tail` deletes a long-running service's start — it's the OLDEST
+# line in the file — and the viewer then loses that row permanently (the data is
+# gone, not merely outside a read window, so even a full re-read can't recover it).
+# Preserving open starts keeps `npx expo start`, `next dev`, ngrok, etc. visible
+# across a rotation; a dead-but-unclosed op is harmless — the app's pid-liveness
+# prune drops it after folding. JOYSTICK_ROTATE_KEEP overrides the count for the
+# test only; production is always 2000. Re-chmod after the mv: the rotated file
+# lands with the umask, not 600, and principle #6 wants the plaintext locked down
+# now, not only at the next shell startup.
+_joystick_rotate_log() {
+  local log=$JOYSTICK_LOG keep=${JOYSTICK_ROTATE_KEEP:-2000}
+  [[ -f $log ]] || return 0
+  awk -v keep="$keep" '
+    function val(s, key) {
+      if (match(s, "\"" key "\":\"")) { s = substr(s, RSTART + RLENGTH); sub(/".*/, "", s); return s }
+      return ""
+    }
+    { line[NR] = $0
+      ev = val($0, "ev"); id = val($0, "id")
+      if (ev == "start") open[id] = NR          # last start wins (claude reuses an id across turns)
+      else if (ev == "end") delete open[id] }   # ...and its end closes it
+    END {
+      from = NR - keep + 1; if (from < 1) from = 1
+      n = 0
+      for (id in open) if (open[id] < from) keep_ln[n++] = open[id]   # open starts in the dropped head
+      for (i = 1; i < n; i++) {                                       # insertion-sort into chronological order
+        v = keep_ln[i]; j = i - 1
+        while (j >= 0 && keep_ln[j] > v) { keep_ln[j+1] = keep_ln[j]; j-- }
+        keep_ln[j+1] = v
+      }
+      for (i = 0; i < n; i++) print line[keep_ln[i]]                  # preserved open starts, oldest first
+      for (i = from; i <= NR; i++) print line[i]                      # then the recent tail
+    }
+  ' "$log" > "$log.tmp" && mv "$log.tmp" "$log" && chmod 600 "$log" 2>/dev/null
+}
+
 # Housekeeping once per shell startup: rotate the log past ~5MB and drop
 # stale Claude session surface caches.
 if [[ -f $JOYSTICK_LOG ]] && (( $(stat -f %z "$JOYSTICK_LOG" 2>/dev/null || echo 0) > 5242880 )); then
-  tail -n 2000 "$JOYSTICK_LOG" > "$JOYSTICK_LOG.tmp" && mv "$JOYSTICK_LOG.tmp" "$JOYSTICK_LOG"
+  _joystick_rotate_log
 fi
 command find "${JOYSTICK_LOG:h}" \( -name 'surface-*' -o -name 'waiting-*' -o -name 'cpid-*' \) -mtime +7 -delete 2>/dev/null
 # Clear any stale surface cache for this PID (guards against PID reuse).
