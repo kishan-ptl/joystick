@@ -128,17 +128,23 @@ problem that killed drag — there's no press-drag to starve, so the
 `.onTapGesture { focus }` and the `FirstMouseView` overlay both keep working
 untouched. Reorder is keyboard/menu, focus is click; they never contend.
 
-- `moveRow` reorders relative to the row's **visible** neighbor (not its raw
-  `slotOrder` neighbor), so with a filter active the row swaps with the row you
-  actually see — hidden rows stay put. **No wrap**: nudging the top row up (or
-  bottom down) is a no-op, which is what a hand-placed list should do.
+- `moveRow` reorders the row within the **visible** list (not the raw
+  `slotOrder`), so with a filter active it moves past the rows you actually see;
+  hidden (filtered-out) rows stay pinned to their slots. It does this by
+  reordering the visible-key subsequence and stitching it back into `slotOrder`
+  at the visible positions. It **wraps** like the cursor: ⌘↓ on the bottom row
+  jumps it to the top (⌘↑ on the top row to the bottom), so two rows is a
+  straight swap — added 2026-06-15 right after, on Kishan's ask to swap the
+  top/bottom rows directly.
 - Writes straight through to the persisted `slotOrder` (same UserDefaults key as
   the auto first-seen order) and re-sorts `orderedGroups` immediately, so the
   move shows before the next `reload()`. The cursor follows the moved row.
-- **⌘↑/⌘↓** are gated on the command modifier inside the existing key monitor
-  (keyCodes 126/125); bare ↑/↓ still just move the cursor. The right-click items
-  appear only in the keyboard-nav window (`keyboardNav`), disabled at the ends —
-  the menubar popover keeps its prioritized sort, no reordering there.
+- **⌘↑/⌘↓** are gated on `flags.contains(.command)` inside the existing key
+  monitor (keyCodes 126/125) — NOT `== .command`, because macOS reports arrow
+  keys as function keys so their flags always carry `.numericPad`/`.function`;
+  bare ↑/↓ still just move the cursor. The right-click items appear only in the
+  keyboard-nav window (`keyboardNav`), enabled whenever there's >1 row (wrap
+  means no dead ends) — the menubar popover keeps its prioritized sort.
 
 ## Worktree chip on Claude rows (2026-06-14)
 

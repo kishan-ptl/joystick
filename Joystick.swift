@@ -671,21 +671,26 @@ final class Store: ObservableObject {
     }
 
     // ⌘↑ / ⌘↓ (and the right-click "Move up/down"): nudge a row one place in the
-    // persisted slot order. We reorder relative to the row's VISIBLE neighbor —
-    // not its raw slotOrder neighbor — so that with a filter active the row swaps
-    // with the row you actually see above/below it, leaving hidden rows where
-    // they sit. No wrap: nudging the top row up (or the bottom down) is a no-op,
-    // which feels right for a hand-placed list. The cursor follows the moved row.
+    // persisted slot order. We reorder the row's position in the VISIBLE list —
+    // not the raw slotOrder — so that with a filter active it moves past the rows
+    // you actually see, leaving hidden (filtered-out) rows pinned where they sit.
+    // It WRAPS, like the cursor does: ⌘↓ on the bottom row jumps it to the top
+    // (⌘↑ on the top row to the bottom) — so with two rows it's a straight swap.
+    // The cursor follows the moved row.
     @discardableResult
     func moveRow(_ key: String, _ delta: Int) -> Bool {
-        let vis = visibleGroups.map(\.key)
-        guard let vi = vis.firstIndex(of: key) else { return false }
-        let vj = vi + delta
-        guard vj >= 0, vj < vis.count else { return false }
-        let neighbor = vis[vj]
-        slotOrder.removeAll { $0 == key }
-        guard let ni = slotOrder.firstIndex(of: neighbor) else { return false }
-        slotOrder.insert(key, at: delta > 0 ? ni + 1 : ni)
+        var vis = visibleGroups.map(\.key)
+        guard vis.count > 1, let vi = vis.firstIndex(of: key) else { return false }
+        let vj = ((vi + delta) % vis.count + vis.count) % vis.count   // wrap both ends
+        vis.remove(at: vi)
+        vis.insert(key, at: vj)
+        // Stitch the reordered visible sequence back into slotOrder: at each slot
+        // that holds a visible key, drop in the next key from the new order; the
+        // hidden ones keep their exact slots. (Counts match — every visible key is
+        // in slotOrder exactly once — so the iterator never runs dry.)
+        let visibleSet = Set(vis)
+        var next = vis.makeIterator()
+        slotOrder = slotOrder.map { visibleSet.contains($0) ? next.next()! : $0 }
         persistSlotOrder()
         // Re-sort the rendered list to the new slotOrder now, rather than waiting
         // for the next reload() — same groups, just reindexed by the new order.
@@ -1344,8 +1349,7 @@ struct GroupRow: View {
     var jumpNumber: Int? = nil     // this row's ⌘N number (1–9), if in range
     var markUnread: (Op) -> Void = { _ in }
     var clearRow: (Op) -> Void = { _ in }
-    var canMoveUp: Bool = false    // window nav only — gates the "Move up" item
-    var canMoveDown: Bool = false  // window nav only — gates the "Move down" item
+    var canReorder: Bool = false   // window nav, >1 row — gates "Move up/down"
     var moveRow: (Int) -> Void = { _ in }   // -1 = up, +1 = down
     let action: () -> Void
 
@@ -1449,13 +1453,14 @@ struct GroupRow: View {
         .contextMenu {
             copyMenu(for: group.current)
             // Hand-reordering lives only in the keyboard-nav window (the menubar
-            // keeps its prioritized sort). Mirrors ⌘↑/⌘↓; disabled at the ends.
+            // keeps its prioritized sort). Mirrors ⌘↑/⌘↓ and wraps, so even the
+            // top/bottom row can Move Up/Down (to the other end).
             if keyboardNav {
                 Divider()
                 Button { moveRow(-1) } label: { Label("Move Up", systemImage: "arrow.up") }
-                    .disabled(!canMoveUp)
+                    .disabled(!canReorder)
                 Button { moveRow(1) } label: { Label("Move Down", systemImage: "arrow.down") }
-                    .disabled(!canMoveDown)
+                    .disabled(!canReorder)
             }
             // "Clear" and "Mark unread" are inverses and never both apply: a row
             // is either flagging something to clear, or already clear (markable).
@@ -1782,8 +1787,7 @@ struct ContentView: View {
                  jumpNumber: (keyboardNav && index < 9) ? index + 1 : nil,
                  markUnread: { store.markUnread($0) },
                  clearRow: { store.clearRow($0) },
-                 canMoveUp: keyboardNav && index > 0,
-                 canMoveDown: keyboardNav && index < store.visibleGroups.count - 1,
+                 canReorder: keyboardNav && store.visibleGroups.count > 1,
                  moveRow: { store.moveRow(g.key, $0) }) {
             store.selectedKey = g.key   // a mouse click also moves the cursor
             store.focus(g.current)
