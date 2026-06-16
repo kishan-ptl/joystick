@@ -27,6 +27,11 @@ Each operation is two events sharing an `id` — a `start` and an `end`.
 //        (name/color optional — a deliberate rename + agent color; shown as a row badge)
 //        (wt optional — git worktree leaf when the session runs in a LINKED worktree; shown as a row chip)
 {"v":1,"ev":"meta","id":"<id>","title":"<topic>","model":"<id>","mode":"<perm-mode>","name":"<rename>","color":"<palette>","wt":"<worktree>","ctx":<tokens>,"ts":<unix>}
+// reset  (Claude only — emitted on /clear|/resume|/compact, before any prompt)
+//        A new session took over this terminal: id = the NEW claude-<sid>, pid = the
+//        (unchanged) claude process. Retires any earlier session's row on that pid NOW,
+//        so the cleared terminal stops showing the old conversation. No new op opens.
+{"v":1,"ev":"reset","id":"<new id>","pid":<int>,"ts":<unix>}
 ```
 
 > **Line-size invariant (load-bearing):** keep every line **under ~4096 bytes

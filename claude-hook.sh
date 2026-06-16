@@ -1,8 +1,9 @@
 #!/bin/zsh
 # claude-hook.sh — Claude Code hook handler for joystick. Wired in
-# ~/.claude/settings.json to: UserPromptSubmit, PreToolUse, Stop, StopFailure,
-# Notification, PostToolUse, PostToolUseFailure.
+# ~/.claude/settings.json to: SessionStart, UserPromptSubmit, PreToolUse, Stop,
+# StopFailure, Notification, PostToolUse, PostToolUseFailure.
 #
+# SessionStart          -> "reset" on /clear|/resume|/compact (retire prior row now)
 # UserPromptSubmit      -> "start" (turn shows as running)
 # PreToolUse            -> "active" at the START of a Task/Agent (subagents only)
 # Stop / StopFailure    -> "end" (exit 0 / 1) + done / failed desktop notification
@@ -155,6 +156,26 @@ emit_meta() {  # $1 = transcript path (may be empty)
 }
 
 case $event in
+  SessionStart)
+    # /clear, /resume and /compact each rotate to a NEW session_id on the SAME
+    # claude process and terminal, with no prompt submitted yet. Without a signal
+    # here the cleared row keeps showing the OLD conversation until your first
+    # prompt's `start` retires it. Emit a `reset` now so the viewer retires the
+    # prior session's row immediately. (startup is a fresh process — nothing to
+    # retire — so skip it.) The pid carries the match: the claude process is
+    # unchanged across the rotation, and no two live processes share a pid. The
+    # viewer's `case "reset"` runs the same supersede rule as a new `start`.
+    src=$(jq -r '.source // empty' <<<"$input")
+    case $src in clear|resume|compact) ;; *) exit 0 ;; esac
+    cpid=$(claude_pid)
+    # Cache the resolved pid for the new sid so the first prompt skips the ps
+    # walk — but only a confidently-resolved claude/node pid, never the $PPID
+    # fallback (caching that would make the row look dead next turn).
+    comm=$(ps -o comm= -p "$cpid" 2>/dev/null)
+    case "${comm:t}" in claude*|node*) print -r -- "$cpid" > "${LOG:h}/cpid-$sid" ;; esac
+    jq -cn --arg id "$id" --argjson pid "$cpid" --argjson ts "$now" \
+      '{v:1,ev:"reset",id:$id,pid:$pid,ts:$ts}' >> "$LOG"
+    ;;
   UserPromptSubmit)
     rm -f "${LOG:h}/waiting-$sid"
     prompt=$(jq -r '.prompt // ""' <<<"$input")
