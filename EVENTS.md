@@ -23,6 +23,11 @@ Each operation is two events sharing an `id` — a `start` and an `end`.
 //        start: carries `act` (the subagent's label); finish: carries subdone:true
 {"v":1,"ev":"active","id":"<id>","act":"Task: <desc>","sub":"<tool_use_id>","ts":<unix>}
 {"v":1,"ev":"active","id":"<id>","sub":"<tool_use_id>","subdone":true,"ts":<unix>}
+// active + shell  (Claude only — one live BACKGROUND-SHELL line; run_in_background Bash)
+//        Like `sub`, but SESSION-scoped: a bg shell outlives the turn that launched it,
+//        so its line persists across turns until its <task-notification> finish.
+{"v":1,"ev":"active","id":"<id>","act":"<command>","shell":"<tool_use_id>","ts":<unix>}
+{"v":1,"ev":"active","id":"<id>","shell":"<tool_use_id>","subdone":true,"ts":<unix>}
 // meta  (Claude only — emitted on turn close; session-level, not per-turn)
 //        (name/color optional — a deliberate rename + agent color; shown as a row badge)
 //        (wt optional — git worktree leaf when the session runs in a LINKED worktree; shown as a row chip)
@@ -56,6 +61,7 @@ Each operation is two events sharing an `id` — a `start` and an `end`.
 | `exit` / `dur` / `msg` | end status / duration / reason (waiting why, or Claude's closing blurb on `end`) |
 | `act` | `active` only — live subtitle (tool just used, or a subagent's label); **sanitized** |
 | `sub` / `subdone` | `active` only — a live subagent line: `sub` = Task `tool_use_id` (matches start↔finish); `subdone:true` ends it. Concurrent subagents each get their own line under the session row |
+| `shell` / `subdone` | `active` only — a live background-shell line: `shell` = the `run_in_background` Bash `tool_use_id` (matches start↔finish; the completion `<task-notification>` carries the same id); `subdone:true` ends it. **Session-scoped** — unlike `sub`, it persists across turns until the shell exits |
 | `title` / `model` / `mode` / `ctx` | `meta` only — session topic, model id, permission mode, context-window tokens used |
 | `name` / `color` | `meta` only — user-set session rename (**sanitized**) + agent color name; shown as a row badge. Empty/absent when unset |
 | `wt` | `meta` only — git worktree leaf (the worktree directory's basename) when the session runs in a LINKED worktree; shown as a row chip. Empty/absent on the main checkout |

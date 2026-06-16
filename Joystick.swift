@@ -474,12 +474,17 @@ final class Store: ObservableObject {
         // Attach per-session meta (title/model/mode/ctx from `meta` events) to
         // each Claude group's current op for display.
         func withMeta(_ g: SurfaceGroup) -> SurfaceGroup {
-            guard let m = fold.meta[g.key] else { return g }
             var g = g
-            g.current.title = m.title; g.current.model = m.model
-            g.current.mode = m.mode; g.current.ctxTokens = m.ctx
-            g.current.sessionName = m.name; g.current.agentColor = m.color
-            g.current.worktree = m.wt
+            if let m = fold.meta[g.key] {
+                g.current.title = m.title; g.current.model = m.model
+                g.current.mode = m.mode; g.current.ctxTokens = m.ctx
+                g.current.sessionName = m.name; g.current.agentColor = m.color
+                g.current.worktree = m.wt
+            }
+            // Background shells are session-scoped and outlive the launching turn, so
+            // attach them whatever the current op's state (a running turn, or an idle
+            // one whose shells are still going).
+            g.current.bgShells = fold.bgShells[g.key] ?? []
             return g
         }
         activeGroups = active.map(withMeta)
@@ -1289,6 +1294,12 @@ struct OpRow: View {
         } else if op.isService {
             parts.append(Text("serving"))
         }
+        // Background shells (run_in_background) run alongside whatever the turn is
+        // doing and outlive it, so they get their own segment — not part of the
+        // status chain above. The actual commands list beneath the row.
+        if !op.bgShells.isEmpty {
+            parts.append(Text("▷ \(op.bgShells.count) shell\(op.bgShells.count == 1 ? "" : "s")"))
+        }
         parts.append(Text(tilde(op.cwd)))
         if !op.tty.isEmpty { parts.append(Text(op.tty)) }
         if let code = op.exitCode, code != 0 {
@@ -1436,6 +1447,34 @@ struct GroupRow: View {
                     HStack(spacing: 0) {
                         Spacer().frame(width: 43)
                         Text("+\(kids.count - 3) more")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .opacity(0.55)
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+            // Background shells (run_in_background): list each running shell's command
+            // beneath the row. NOT gated on isRunning — a shell outlives the turn that
+            // launched it, so it shows even while the session's current op sits idle.
+            // ▷ (a running operation) keeps them distinct from ⚙ subagents and the
+            // ◉ green of a port-holding service. Same ≤3 + "+N more" cap as history.
+            if !group.current.bgShells.isEmpty {
+                let shells = group.current.bgShells
+                ForEach(shells.prefix(3)) { sh in
+                    HStack(spacing: 0) {
+                        Spacer().frame(width: 43)  // align under the command text
+                        Text("▷ \(sh.label)")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                }
+                if shells.count > 3 {
+                    HStack(spacing: 0) {
+                        Spacer().frame(width: 43)
+                        Text("+\(shells.count - 3) more")
                             .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(.secondary)
                             .opacity(0.55)
