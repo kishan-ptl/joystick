@@ -1061,6 +1061,11 @@ extension Color {
 
     static let claudeOrange = Color(red: 217 / 255, green: 119 / 255, blue: 87 / 255)
 
+    // ctx-fill warnings on Claude rows: warm gold at 80%+, red at 90%+. Reuses
+    // the waiting light's gold (0xFFC107) and the agent palette's Dracula red.
+    static let ctxWarn = Color(hex: 0xFFC107)
+    static let ctxDanger = Color(hex: 0xff5858)
+
     // Claude Code's /color agent palette is the Dracula colors (extracted from the
     // CLI binary) — NOT SwiftUI's stock .purple etc., which look noticeably off.
     // These are the 8 names /color offers; unknown/empty → nil (neutral pill).
@@ -1209,7 +1214,7 @@ struct OpRow: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
-                Text(subtitle)
+                subtitleText
                     .font(.system(.caption).monospacedDigit())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -1265,37 +1270,48 @@ struct OpRow: View {
         .font(.system(size: 11))
     }
 
-    private var subtitle: String {
-        var parts: [String] = []
+    private var subtitleText: Text {
+        // Most segments inherit the row's secondary grey (set on the view); only
+        // the ctx-fill segment overrides its own color, so we build Text runs and
+        // concatenate them rather than joining a plain String.
+        var parts: [Text] = []
         if let since = op.waitingSince {
             let what = (op.waitingMsg?.isEmpty == false) ? op.waitingMsg! : "needs you"
-            parts.append("✋ \(what) — \(fmt(nowTs - since))")
+            parts.append(Text("✋ \(what) — \(fmt(nowTs - since))"))
         } else if let idle = op.stallIdle {
-            parts.append("✋ waiting for input? quiet \(fmt(idle))")
+            parts.append(Text("✋ waiting for input? quiet \(fmt(idle))"))
         } else if op.isRunning, op.liveSubagents.count == 1 {
-            parts.append("⚙ \(op.liveSubagents[0].label)")          // a lone subagent reads inline, as before
+            parts.append(Text("⚙ \(op.liveSubagents[0].label)"))          // a lone subagent reads inline, as before
         } else if op.isRunning, op.liveSubagents.count >= 2 {
-            parts.append("⚙ \(op.liveSubagents.count) agents running")  // fan-out: count here, list below
+            parts.append(Text("⚙ \(op.liveSubagents.count) agents running"))  // fan-out: count here, list below
         } else if op.isRunning, let act = op.activity, !act.isEmpty {
-            parts.append("⚙ \(act)")       // live agent activity (PostToolUse)
+            parts.append(Text("⚙ \(act)"))       // live agent activity (PostToolUse)
         } else if op.isService {
-            parts.append("serving")
+            parts.append(Text("serving"))
         }
-        parts.append(tilde(op.cwd))
-        if !op.tty.isEmpty { parts.append(op.tty) }
+        parts.append(Text(tilde(op.cwd)))
+        if !op.tty.isEmpty { parts.append(Text(op.tty)) }
         if let code = op.exitCode, code != 0 {
-            parts.append(code == -1 ? "killed" : "exit \(code)")
+            parts.append(Text(code == -1 ? "killed" : "exit \(code)"))
         }
-        if let end = op.endTs { parts.append(fmt(nowTs - end) + " ago") }
+        if let end = op.endTs { parts.append(Text(fmt(nowTs - end) + " ago")) }
         if op.isClaude {   // session context fill + model + notable mode (from meta)
             if op.ctxTokens > 0 {
                 let limit = op.ctxTokens > 200_000 ? 1_000_000.0 : 200_000.0
-                parts.append("\(Int((op.ctxTokens / limit) * 100))% ctx")
+                let pct = Int((op.ctxTokens / limit) * 100)
+                var seg = Text("\(pct)% ctx")
+                if pct >= 90 { seg = seg.foregroundColor(.ctxDanger) }       // running out of room
+                else if pct >= 80 { seg = seg.foregroundColor(.ctxWarn) }    // getting full
+                parts.append(seg)
             }
-            if !op.model.isEmpty { parts.append(shortModel(op.model)) }
-            if op.mode == "bypassPermissions" { parts.append("⚠ bypass") }
+            if !op.model.isEmpty { parts.append(Text(shortModel(op.model))) }
+            if op.mode == "bypassPermissions" { parts.append(Text("⚠ bypass")) }
         }
-        return parts.joined(separator: " · ")
+        guard var joined = parts.first else { return Text("") }
+        // Text interpolation (not `+`, deprecated in macOS 26) — keeps each run's
+        // own color, so the ctx segment stays gold/red while the rest is grey.
+        for seg in parts.dropFirst() { joined = Text("\(joined) · \(seg)") }
+        return joined
     }
 
     private var timeText: String {
