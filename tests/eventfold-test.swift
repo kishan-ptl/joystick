@@ -84,6 +84,28 @@ struct EventFoldTests {
             check("subdone drops one subagent", f.open["claude-x"]?.liveSubagents.map(\.id) == ["tu2"])
         }
 
+        // 7b. background shells (run_in_background): session-scoped, OUTLIVE the turn,
+        //     drop on the <task-notification> (subdone), and clear on reset.
+        do {
+            var f = EventFold()
+            f.apply(ev(#"{"kind":"claude","ev":"start","id":"claude-x","cmd":"» go","ts":100}"#))
+            f.apply(ev(#"{"ev":"active","id":"claude-x","act":"npx tsx a.ts","shell":"sh1","ts":101}"#))
+            f.apply(ev(#"{"ev":"active","id":"claude-x","act":"npx tsx b.ts","shell":"sh2","ts":102}"#))
+            check("bg shells tracked at session level", f.bgShells["claude-x"]?.count == 2)
+            check("bg shell start does NOT touch liveSubagents", f.open["claude-x"]?.liveSubagents.isEmpty == true)
+            // The launching turn ends, but the shells keep running across turns.
+            f.apply(ev(#"{"ev":"end","id":"claude-x","exit":0,"dur":3,"ts":103}"#))
+            check("bg shells survive the turn end", f.bgShells["claude-x"]?.count == 2)
+            // A completion notification (carries the Bash tool_use_id) drops one.
+            f.apply(ev(#"{"ev":"active","id":"claude-x","shell":"sh1","subdone":true,"ts":104}"#))
+            check("shell subdone drops one shell", f.bgShells["claude-x"]?.map(\.id) == ["sh2"])
+            // A subdone for an unknown id is a harmless no-op (e.g. a subagent's notification).
+            f.apply(ev(#"{"ev":"active","id":"claude-x","shell":"nope","subdone":true,"ts":105}"#))
+            check("unknown shell subdone is a no-op", f.bgShells["claude-x"]?.map(\.id) == ["sh2"])
+            f.reset()
+            check("reset clears bg shells", f.bgShells.isEmpty)
+        }
+
         // 8. meta keyed by claude-<sid>
         do {
             var f = EventFold()

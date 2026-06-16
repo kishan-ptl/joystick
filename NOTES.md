@@ -241,6 +241,36 @@ hot path for marginal precision. Net perf is neutral-to-faster: removes a
 per-Task log write, adds only a cheap string check in the once-per-turn
 UserPromptSubmit path.
 
+## Background shells — run_in_background Bash on the row (2026-06-16)
+
+Gap: Claude Code's own footer counts background shells (`npx tsx … &`) that
+Joystick couldn't see — they aren't Ghostty terminals (no surface) and don't run
+the zsh emitter (interactive shells only), so a session's "N running" read lower
+than reality. Now a `run_in_background` Bash shows as a `▷` line under its
+session row.
+
+Mechanism mirrors subagents but with one essential difference: a bg shell
+**outlives the turn that launched it** (the whole point of run_in_background), so
+it can't ride on the per-turn `Op` the way `liveSubagents` do. It lives in a
+**session-scoped** `EventFold.bgShells[claude-<sid>]`, attached to the row's
+current op at render time (running OR idle). Keyed by the Bash `tool_use_id`:
+`PostToolUse` emits the start (`shell` field on an `active` event); the completion
+`<task-notification>` carries the same id and drops it. Backward-compatible — old
+viewers ignore `shell` and treat it as a normal activity line.
+
+The subagent decision above accepted "mid-turn completion lingers until the turn
+ends." That's fine for a subagent (its line dies with the turn) but WRONG for a
+shell (its line must persist *across* turns until the shell actually exits). So
+mid-turn completions can't be ignored here — they'd strand a phantom forever.
+Fix: a Stop-time `drain_finished_shells` that scans the transcript (where every
+completion is recorded regardless of delivery timing) and drops finished shells.
+This does NOT contradict the subagent section's rejection of per-PostToolUse
+transcript scans: the drain runs once per **turn close**, not per tool call, and
+is gated on a per-shell marker glob (`jshell-<sid>-<tuid>`) so a turn with no
+shells pays a single `stat`, never a transcript read. Markers also make each drop
+exactly-once across the two completion paths (idle → UserPromptSubmit, mid-turn →
+Stop drain). Marker cleanup is deferred — see Known issues / debt.
+
 ## Cleared-session orphan row — /clear rotates the session id (2026-06-15)
 
 Symptom: after `/clear`, the terminal's row keeps showing the PREVIOUS prompt (a
@@ -445,6 +475,19 @@ annoyances are the real v0.2.
   record by ~40s, i.e. submit-time not pickup-time). We can't reliably tell
   queued-vs-running from hook events, so we don't guess. Real fix: a Claude Code
   "turn actually started" signal — worth a /feedback request. (2026-06-15)
+- The hook leaks per-session scratch files in `~/.local/state/joystick/`:
+  `cpid-<sid>` and `surface-<sid>` are written once per session and **never**
+  removed; `waiting-<sid>` is removed on the next event but orphans when a session
+  ends while waiting; `jshell-<sid>-<tuid>` (background-shell markers, 2026-06-16)
+  orphan when a session dies mid-shell. All are 0-byte and functionally inert (the
+  `jshell` drain gate is sid-scoped, so a dead session's markers never trigger
+  work), but they accumulate (~180 already). Fix: ONE `SessionStart` liveness
+  sweep across all categories — delete a session's markers when its `cpid-<sid>`
+  pid is dead (`kill -0`). Must key on **liveness, not age** — a background shell
+  can legitimately run for days, so an age-based sweep would delete a live shell's
+  marker and strand it as a permanent phantom. Cheap (runs at session boundaries,
+  not per-turn; self-limiting) but deferred — it's a pre-existing hook-wide leak,
+  not a bg-shell problem, so it deserves its own scoped change. (2026-06-16)
 
 ## Resolved in 2026-06-12 architecture review
 - Log re-parsed every 1s tick on main thread → now gated on (mtime, size)

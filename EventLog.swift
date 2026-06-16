@@ -29,7 +29,8 @@ struct RawEvent: Decodable {
     let msg: String?
     let act: String?       // current activity (tool the agent just used), on `active` events
     let sub: String?       // subagent key (Task tool_use_id), on `active` events that track a live Task
-    let subdone: Bool?     // true on the `active` event that ENDS a tracked subagent
+    let shell: String?     // background-shell key (run_in_background Bash tool_use_id), on `active` events that track a live bg shell
+    let subdone: Bool?     // true on the `active` event that ENDS a tracked subagent or bg shell
     let title: String?     // session topic (ai-title), on `meta` events
     let model: String?     // model id, on `meta` events
     let mode: String?      // permission mode, on `meta` events
@@ -63,6 +64,7 @@ struct Op: Identifiable {
     var waitingMsg: String? = nil
     var activity: String? = nil       // live: tool the agent is currently using (Claude)
     var liveSubagents: [LiveChild] = []  // live: subagents (Task) running this turn, in start order
+    var bgShells: [LiveChild] = []       // live: background shells (run_in_background) for this session; attached at render time from EventFold.bgShells. They OUTLIVE the turn that launched them, so unlike liveSubagents they're session-scoped, not per-op.
     var stallIdle: Double? = nil      // heuristic: tty quiet + fg proc asleep
     var isService = false             // fg process group holds a listening port
     var unseen = false                // finished, and surface not viewed since
@@ -110,6 +112,7 @@ struct EventFold {
     private(set) var open: [String: Op] = [:]    // id -> currently-open op
     private(set) var done: [Op] = []             // finished ops, oldest first (tail-capped)
     private(set) var meta: [String: SessionMeta] = [:]  // claude-<sid> -> session metadata
+    private(set) var bgShells: [String: [LiveChild]] = [:]  // claude-<sid> -> live background shells (run_in_background). Session-scoped, NOT per-op: a bg shell outlives the turn that launched it, so it can't ride along on a turn's Op the way liveSubagents do.
     private var nextSeq = 0                              // monotonic id source for Op.seq
 
     static let maxDoneRetained = 2000   // incremental parse accumulates; cap retained finished ops
@@ -185,6 +188,19 @@ struct EventFold {
                 open[e.id] = op
             }
         case "active":
+            // A background shell (run_in_background Bash) is tracked at SESSION level,
+            // not on the turn's op: it keeps running across many turns (often after the
+            // launching turn has long since ended), so it can't live on a per-turn Op the
+            // way a subagent does. Keyed by the Bash tool_use_id; added on start (the
+            // PostToolUse), dropped on finish (the <task-notification>, which carries the
+            // same id). Independent of whether an op is currently open for this session.
+            if let sh = e.shell, !sh.isEmpty {
+                bgShells[e.id, default: []].removeAll { $0.id == sh }
+                if e.subdone != true {
+                    bgShells[e.id, default: []].append(LiveChild(id: sh, label: e.act ?? "shell"))
+                }
+                break
+            }
             if var op = open[e.id] {
                 op.waitingSince = nil
                 op.waitingMsg = nil
@@ -236,6 +252,11 @@ struct EventFold {
             op.isClaude && op.key != id
                 && ((!surface.isEmpty && op.surface == surface) || (pid > 0 && op.pid == pid))
         }
+        // Drop the retired session's bg shells too, so a shell whose completion
+        // notification never arrives (session killed mid-run) doesn't orphan a line.
+        let retiredIds = Set(open.values.filter(superseded).map(\.key))
+            .union(done.filter(superseded).map(\.key))
+        for rid in retiredIds { bgShells.removeValue(forKey: rid) }
         open = open.filter { !superseded($0.value) }
         done.removeAll(where: superseded)
     }
@@ -258,7 +279,7 @@ struct EventFold {
     // Forget everything — used on rotation/truncation and on the 4am day rollover,
     // both of which force a full re-read from the top of the log.
     mutating func reset() {
-        open = [:]; done = []; meta = [:]; nextSeq = 0
+        open = [:]; done = []; meta = [:]; bgShells = [:]; nextSeq = 0
     }
 
     // MARK: Tally helpers (pure; Store owns the @Published counter + persistence)

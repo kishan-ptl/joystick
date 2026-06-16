@@ -64,6 +64,39 @@ claude_transcript() {
   [[ -f $tpath ]] && print -r -- "$tpath"
 }
 
+# Drop one tracked background shell (emit its `subdone`), guarded by a per-shell
+# marker so each shell drops exactly ONCE no matter how many paths see its
+# completion. A bg shell's completion <task-notification> can reach us two ways —
+# as a fresh UserPromptSubmit (session was idle) OR only in the transcript (it
+# finished mid-turn, folded into the running turn with no UserPromptSubmit) — so
+# both the prompt handler and the Stop-time drain call this; the marker makes the
+# second a no-op. $1 = the shell's tool_use_id.
+drop_shell() {
+  local mk="${LOG:h}/jshell-$sid-$1"
+  [[ -n $1 && -e $mk ]] || return 0
+  rm -f "$mk"
+  jq -cn --arg id "$id" --arg sh "$1" --argjson ts "$now" \
+    '{v:1,ev:"active",id:$id,shell:$sh,subdone:true,ts:$ts}' >> "$LOG"
+}
+
+# Drain any background shells that FINISHED — scan the transcript for the
+# tool_use_ids carried by completion <task-notification>s and drop each (marker
+# guards against double-drop). This is what catches shells that finished mid-turn,
+# whose notification never arrived as its own UserPromptSubmit. $1 = transcript path.
+drain_finished_shells() {
+  [[ -n $1 && -f $1 ]] || return 0
+  # Cheap gate: do nothing unless this session actually has an open shell. The
+  # marker glob is a stat, not a transcript read — so the overwhelmingly common
+  # case (a turn with no background shells) pays nothing, and the scan below only
+  # runs while shells are genuinely in flight.
+  setopt local_options nullglob
+  local markers=("${LOG:h}/jshell-$sid-"*)
+  (( ${#markers} )) || return 0
+  tail -n 1200 "$1" 2>/dev/null | grep -F '<task-notification>' \
+    | grep -oE 'tool-use-id>toolu_[A-Za-z0-9]+' | sed 's/.*>//' | sort -u \
+    | while read -r tuid; do drop_shell "$tuid"; done
+}
+
 # Close this session's open turn (if any) with the given exit code. Decides
 # open/closed from start/end lines only — a turn that went start→waiting→active
 # (you approved a permission prompt) has `active` last; including it would
@@ -89,6 +122,9 @@ close_turn() {  # $1 = exit code  $2 = notify title  $3 = notify verb
   # no end_turn shows (a turn that ended on a tool call). Then flatten to one
   # line + redact + cap like every free-text field (< PIPE_BUF, no secrets).
   tpath=$(claude_transcript)
+  # Drain background shells that finished during this turn (including mid-turn
+  # completions, whose notification never fired its own UserPromptSubmit drop).
+  drain_finished_shells "$tpath"
   if [[ $1 == 0 && -n $tpath ]]; then
     local tries=0
     while (( tries < 15 )); do
@@ -186,6 +222,13 @@ case $event in
     # The finished subagent's own live line needs no explicit drop here: the
     # viewer hides subagent lines once this turn's op stops running.
     if [[ $prompt == *'<task-notification>'* ]]; then
+      # A background shell (or a subagent) finished and woke the session. Drop the
+      # live shell line for every tool_use_id the notification(s) carry — marker-
+      # guarded, so a subagent's id (untracked) is a no-op. This is the fast path
+      # (idle completion → its own turn); mid-turn completions are caught instead
+      # by the Stop-time drain. Emitted BEFORE the turn's start so it clears first.
+      print -r -- "$prompt" | grep -oE 'tool-use-id>toolu_[A-Za-z0-9]+' | sed 's/.*>//' \
+        | while read -r tuid; do drop_shell "$tuid"; done
       sm=${prompt#*<summary>}; sm=${sm%%</summary>*}
       [[ $sm == "$prompt" || -z $sm ]] && sm="background agent finished"
       prompt=$sm
@@ -279,7 +322,24 @@ case $event in
     # here was the bug that made subagent lines vanish the instant they appeared.
     [[ $tool == Task || $tool == Agent ]] && exit 0
     case $tool in
-      Bash)       d=$(jq -r '.tool_input.command // ""' <<<"$input"); act="Bash: $d" ;;
+      Bash)
+        d=$(jq -r '.tool_input.command // ""' <<<"$input")
+        # A run_in_background Bash is a SERVICE-like op that outlives this turn: it
+        # keeps running (often for minutes, across turns) until it exits and reports
+        # via a <task-notification>. Track it by tool_use_id as a live background
+        # shell so the session row can show it; the notification (UserPromptSubmit)
+        # drops it. Plain Bash falls through to the latest-wins activity line below.
+        if [[ $(jq -r '.tool_input.run_in_background // false' <<<"$input") == true ]]; then
+          sh=$(jq -r '.tool_use_id // empty' <<<"$input")
+          _joystick_redact "$d"; act=${REPLY[1,120]}   # the bare command; keep line < PIPE_BUF
+          [[ -n $sh ]] && {
+            jq -cn --arg id "$id" --arg act "$act" --arg sh "$sh" --argjson ts "$now" \
+              '{v:1,ev:"active",id:$id,act:$act,shell:$sh,ts:$ts}' >> "$LOG"
+            : > "${LOG:h}/jshell-$sid-$sh"   # mark it open so the drain drops it exactly once
+          }
+          exit 0
+        fi
+        act="Bash: $d" ;;
       Edit|Write|Read|MultiEdit|NotebookEdit)
                   d=$(jq -r '.tool_input.file_path // ""' <<<"$input"); act="$tool ${d:t}" ;;
       Grep|Glob)  d=$(jq -r '.tool_input.pattern // ""' <<<"$input"); act="$tool: $d" ;;
