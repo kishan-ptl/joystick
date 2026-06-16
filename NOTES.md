@@ -262,14 +262,51 @@ The subagent decision above accepted "mid-turn completion lingers until the turn
 ends." That's fine for a subagent (its line dies with the turn) but WRONG for a
 shell (its line must persist *across* turns until the shell actually exits). So
 mid-turn completions can't be ignored here — they'd strand a phantom forever.
-Fix: a Stop-time `drain_finished_shells` that scans the transcript (where every
-completion is recorded regardless of delivery timing) and drops finished shells.
+Fix: a Stop-time drain (`drain_finished_shells`, later generalized to
+`drain_finished_bg` when agents joined — see the bg-agents section below) that scans
+the transcript (where every completion is recorded regardless of delivery timing)
+and drops finished shells.
 This does NOT contradict the subagent section's rejection of per-PostToolUse
 transcript scans: the drain runs once per **turn close**, not per tool call, and
 is gated on a per-shell marker glob (`jshell-<sid>-<tuid>`) so a turn with no
 shells pays a single `stat`, never a transcript read. Markers also make each drop
 exactly-once across the two completion paths (idle → UserPromptSubmit, mid-turn →
 Stop drain). Marker cleanup is deferred — see Known issues / debt.
+
+## Background agents — subagents that outlive the turn (2026-06-16)
+
+Symptom: a session showing "✻ Waiting for 1 background agent to finish" appeared
+*done* (✓ + unseen badge) in Joystick. `Stop` fires the instant the **main** agent
+rests — it does NOT wait for background agents — so `close_turn` emitted `end`, the
+row flipped to ✓, and the still-running agent vanished from the board. Measured in
+the log: a row sat falsely done for up to **+132s** before the agent's "came to
+rest" notification arrived.
+
+Decision (UX): keep the ✓ + badge at main-turn close (your answer IS ready), but
+add a live **"⟳ N bg"** chip on the done row until the agent reports back. The
+alternative — keep the row "working" until all agents finish — was rejected: it
+hides that the main answer is ready.
+
+Implementation reuses the bg-shells machinery wholesale (they're the same shape —
+"work launched this turn that outlives its Stop and reports back via a
+`<task-notification>`"). Subagent tracking MOVED from the per-turn `Op.liveSubagents`
+to a **session-scoped** `EventFold.subagents[claude-<sid>]`, attached to the current
+op at render (inline `⚙` while the turn runs, the `⟳ N bg` chip + list once it's
+done). Completion is the same dual path as shells: PreToolUse drops a per-agent
+marker (`jagent-<sid>-<tuid>`); the completion `<task-notification>` (its own
+UserPromptSubmit *or* the Stop-time drain for mid-turn completions) calls
+`drop_agent`, marker-guarded for exactly-once. The Stop drain is now
+`drain_finished_bg`, one transcript scan dropping both shells and agents.
+
+This reverses the earlier subagent decision ("its line dies with the turn"): that
+was a workaround for not having a reliable per-agent completion signal — now we do
+(the marker + drain), so session-scoped is strictly more correct. Same residual
+risk as shells (a missed completion strands a line until pid death / supersede /
+reset) and the same `jagent-*` marker-cleanup debt — see Known issues / debt.
+
+Deliberately NOT done: bypassing `doneWindowSecs` (6h) for a done row with pending
+agents. Matches bg-shells (which didn't either); 6h is generous and the symmetry is
+worth more than the edge case of an agent running > 6h.
 
 ## Cleared-session orphan row — /clear rotates the session id (2026-06-15)
 
@@ -479,9 +516,10 @@ annoyances are the real v0.2.
   `cpid-<sid>` and `surface-<sid>` are written once per session and **never**
   removed; `waiting-<sid>` is removed on the next event but orphans when a session
   ends while waiting; `jshell-<sid>-<tuid>` (background-shell markers, 2026-06-16)
-  orphan when a session dies mid-shell. All are 0-byte and functionally inert (the
-  `jshell` drain gate is sid-scoped, so a dead session's markers never trigger
-  work), but they accumulate (~180 already). Fix: ONE `SessionStart` liveness
+  and `jagent-<sid>-<tuid>` (background-agent markers, 2026-06-16) orphan when a
+  session dies mid-shell/mid-agent. All are 0-byte and functionally inert (the
+  drain gate is sid-scoped, so a dead session's markers never trigger work), but
+  they accumulate (~180 already). Fix: ONE `SessionStart` liveness
   sweep across all categories — delete a session's markers when its `cpid-<sid>`
   pid is dead (`kill -0`). Must key on **liveness, not age** — a background shell
   can legitimately run for days, so an age-based sweep would delete a live shell's
