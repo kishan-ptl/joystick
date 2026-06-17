@@ -389,13 +389,25 @@ final class Store: ObservableObject {
         // row). Claude turns and external events are always meaningful — keep them
         // regardless of duration, so a quick turn doesn't vanish into the gap
         // between "too young to show running" and "too short to show done".
-        var finished = Array(
-            fold.done.filter { ($0.isExternal || $0.isClaude || ($0.dur ?? 0) >= Self.minDoneSecs)
-                && nowTs - ($0.endTs ?? 0) <= Self.doneWindowSecs
-                && !ignored($0.cmd) }
-                .sorted { ($0.endTs ?? 0) > ($1.endTs ?? 0) }
-                .prefix(Self.maxDone)
-        )
+        let shown = fold.done.filter {
+            ($0.isExternal || $0.isClaude || ($0.dur ?? 0) >= Self.minDoneSecs) && !ignored($0.cmd)
+        }
+        // A live Claude session between turns sits in `done` (its last turn ended)
+        // while the process stays alive — that's its normal resting state, the live
+        // session mission-control exists to mirror, NOT stale history. So it must
+        // survive the staleness cleanups (doneWindowSecs age-out, maxDone count cap)
+        // that exist to forget old shell results: keep every alive-Claude op, and
+        // apply window + cap only to the rest. Liveness (the pid gate below) stays the
+        // sole arbiter for these rows, per Principle #1. See NOTES.md.
+        var liveClaude: [Op] = [], rest: [Op] = []
+        for op in shown {
+            if op.isClaude && alive(op.pid) { liveClaude.append(op) } else { rest.append(op) }
+        }
+        let capped = Array(rest
+            .filter { nowTs - ($0.endTs ?? 0) <= Self.doneWindowSecs }
+            .sorted { ($0.endTs ?? 0) > ($1.endTs ?? 0) }
+            .prefix(Self.maxDone))
+        var finished = (liveClaude + capped).sorted { ($0.endTs ?? 0) > ($1.endTs ?? 0) }
 
         // Closing a tab IS the dismiss gesture: a finished op is dropped once
         // its hosting terminal is gone (noise, not history). How we know it's
