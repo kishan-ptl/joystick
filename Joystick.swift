@@ -655,7 +655,7 @@ final class Store: ObservableObject {
         }
     }
 
-    // On summon, pre-aim the cursor: the first row that needs you (so ⌥⌘J → ⏎
+    // On summon, pre-aim the cursor: the first row that needs you (so summon → ⏎
     // jumps straight to what's waiting), else the tab you're already in, else the
     // top row. With a fixed order there's no "top = most urgent", so we go FIND
     // the urgent one instead of assuming it floated up.
@@ -1970,8 +1970,9 @@ struct MenuBarLabel: View {
 
 // MARK: - Global hotkey & summon
 
-// One system-wide hotkey (⌥⌘J) that brings Joystick up from anywhere —
-// including from inside Ghostty — so triage never needs the mouse. Carbon's
+// One system-wide hotkey (⌃⌘J by default; see HotKeySpec) that brings Joystick
+// up from anywhere — including from inside Ghostty — so triage never needs the
+// mouse. Carbon's
 // RegisterEventHotKey is used deliberately: it works with NO Accessibility
 // permission prompt (unlike a CGEventTap), and is precise about the chord.
 final class HotKey {
@@ -2040,12 +2041,65 @@ final class Summoner {
     func dismiss() { NSApp.hide(nil) }
 }
 
+// Parses the summon-shortcut spec into the (keyCode, Carbon-modifier-mask) pair
+// RegisterEventHotKey wants. Default is ⌃⌘J; override without a rebuild via
+//   defaults write dev.kishan.joystick summonHotKey "ctrl+cmd+j"
+// Tokens are cmd/opt/ctrl/shift + one letter/digit/space/return, split on
+// space/+/- and case-insensitive. We deliberately default OFF the ⌥⌘+letter
+// plane — browsers own it for devtools (⌥⌘J = JS console, ⌥⌘I = inspector, …)
+// and a global hotkey wins system-wide, so ⌥⌘J would silently eat the console
+// shortcut for anyone running Chrome/Firefox.
+enum HotKeySpec {
+    static let `default` = "ctrl+cmd+j"
+
+    // Carbon virtual keycodes worth binding to a summon chord. Exotic keys aren't
+    // worth a table — a launcher shortcut is a modifier + a letter/digit/space.
+    private static let keyCodes: [String: UInt32] = [
+        "a":0,"s":1,"d":2,"f":3,"h":4,"g":5,"z":6,"x":7,"c":8,"v":9,"b":11,
+        "q":12,"w":13,"e":14,"r":15,"y":16,"t":17,"o":31,"u":32,"i":34,"p":35,
+        "l":37,"j":38,"k":40,"n":45,"m":46,
+        "1":18,"2":19,"3":20,"4":21,"5":23,"6":22,"7":26,"8":28,"9":25,"0":29,
+        "space":49,"return":36,"enter":36,
+    ]
+
+    // → (keyCode, modifiers); nil if no modifier, no/unknown key, or >1 key
+    // (caller falls back to the default so a typo can't disable summon).
+    static func parse(_ spec: String) -> (keyCode: UInt32, modifiers: UInt32)? {
+        var mods: UInt32 = 0
+        var key: UInt32?
+        for raw in spec.lowercased().split(whereSeparator: { " +-".contains($0) }) {
+            switch String(raw) {
+            case "cmd", "command":       mods |= UInt32(cmdKey)
+            case "opt", "option", "alt": mods |= UInt32(optionKey)
+            case "ctrl", "control":      mods |= UInt32(controlKey)
+            case "shift":                mods |= UInt32(shiftKey)
+            case let t:
+                guard let code = keyCodes[t], key == nil else { return nil }
+                key = code
+            }
+        }
+        guard let k = key, mods != 0 else { return nil }
+        return (k, mods)
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKey: HotKey?
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        // ⌥⌘J — kVK_ANSI_J is 38.
-        hotKey = HotKey(keyCode: 38, modifiers: UInt32(cmdKey | optionKey)) {
+        let spec = UserDefaults.standard.string(forKey: "summonHotKey") ?? HotKeySpec.default
+        register(HotKeySpec.parse(spec))
+        // A bad override, OR a chord already claimed by another global hotkey
+        // (HotKey init returns nil), both fall back to the default so summon
+        // never silently dies.
+        if hotKey == nil, spec != HotKeySpec.default {
+            register(HotKeySpec.parse(HotKeySpec.default))
+        }
+    }
+
+    private func register(_ chord: (keyCode: UInt32, modifiers: UInt32)?) {
+        guard let chord else { return }
+        hotKey = HotKey(keyCode: chord.keyCode, modifiers: chord.modifiers) {
             Summoner.shared.summon()
         }
     }
@@ -2078,8 +2132,8 @@ struct JoystickApp: App {
     @StateObject private var store = Store()
 
     var body: some Scene {
-        // A single, UNIQUE window (not WindowGroup) — ⌥⌘J must never spawn a
-        // second copy; openWindow(id:) just refocuses this one.
+        // A single, UNIQUE window (not WindowGroup) — the summon hotkey must never
+        // spawn a second copy; openWindow(id:) just refocuses this one.
         Window("Joystick", id: "main") {
             ContentView(keyboardNav: true).environmentObject(store)
         }
