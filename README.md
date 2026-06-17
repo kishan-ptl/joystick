@@ -48,30 +48,37 @@ shell / Claude hooks  →  ~/.local/state/joystick/events.jsonl  →  menubar ap
 
 ## Requirements
 
-- macOS 14+
-- [Ghostty](https://ghostty.org) (the focus/jump features are Ghostty-specific)
-- zsh
+- **macOS 14** (Sonoma) or later
+- **[Ghostty](https://ghostty.org)** — click-to-focus and jump-to-tab are Ghostty-specific
+- **zsh** — for shell-command tracking (Claude tracking works in any shell)
+- **[Claude Code](https://claude.com/claude-code)** — optional; powers the agent-session rows
+- **jq** — for the Claude-hook setup (Homebrew installs it for you)
 
-## Install (developer / pre-release)
-
-> v0.1 packaging (one-click installer, signed app, Homebrew cask) is in
-> progress — see [`PACKAGING.md`](PACKAGING.md). For now:
+## Install
 
 ```sh
-git clone https://github.com/kishan-ptl/joystick ~/joystick
-cd ~/joystick
-
-# 1. shell integration
-echo '[ -f ~/joystick/joystick.zsh ] && source ~/joystick/joystick.zsh' >> ~/.zshrc
-
-# 2. Claude Code hooks — merge the 4 hooks in claude-hook.sh into
-#    ~/.claude/settings.json (UserPromptSubmit/Stop/Notification/PostToolUse)
-
-# 3. build & launch the app
-./build-app.sh && open ~/Applications/Joystick.app
+brew install --cask kishan-ptl/tap/joystick
 ```
 
-Open a new tab and run something long (`sleep 20`) to see it appear.
+No Homebrew? Download `Joystick-<version>.dmg` from the
+[latest release](https://github.com/kishan-ptl/joystick/releases/latest) and drag
+it to Applications. The app is signed and notarized — it opens with no Gatekeeper
+warning.
+
+Then one click wires it up:
+
+1. **Open Joystick.** A *Connect Joystick* panel appears on first launch.
+2. **Click Enable.** It wires the zsh hook and Claude Code hooks into your shell
+   and `~/.claude/settings.json` — idempotent, and it backs up every file it
+   edits. No terminal, no pasting.
+3. **Open a new terminal tab** and run something (`sleep 20`) — it shows up in
+   Joystick. The first time you jump to a tab, macOS asks permission for Joystick
+   to control Ghostty; allow it — that's what powers click-to-focus.
+
+Prefer to wire it by hand, or want to see exactly what changes first? See
+[`INSTALL.md`](INSTALL.md). To unwire later:
+`~/.config/joystick/install.sh uninstall` (and `brew uninstall --cask joystick`
+to remove the app).
 
 ## Privacy
 
@@ -83,6 +90,8 @@ to exclude directories or log command-heads only — in
 
 ## Status
 
-Pre-v0.1, Ghostty + zsh + macOS. Roadmap, design principles, and decision
-history live in [`NOTES.md`](NOTES.md); the path to a shareable release is in
-[`PACKAGING.md`](PACKAGING.md).
+Early but real: signed, notarized, and installable via Homebrew — built and
+dogfooded daily on Ghostty + zsh + macOS. Shell-command tracking is zsh-only for
+now (bash and fish are on the roadmap); Claude-session tracking works in any
+shell. Roadmap, design principles, and the full decision history live in
+[`NOTES.md`](NOTES.md).

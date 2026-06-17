@@ -5,20 +5,12 @@ Claude Code hooks that log agent turns. The installer does both — idempotently
 backing up every file it edits — and copies the emitter scripts to a stable home
 (`$JOYSTICK_HOME`, default `~/.config/joystick`).
 
-## The easy way: let Claude Code do it
+## The easy way: one click in the app
 
-Joystick's audience already runs Claude Code (it's what Joystick watches), so the
-first-run "onboarding" is just a prompt. In the Joystick window, click **Set up**
-— it copies a prompt to your clipboard. Paste it into a Claude Code session:
-
-> Set up Joystick on this Mac: run the installer at
-> `~/Applications/Joystick.app/Contents/Resources/install.sh` — it wires up the
-> zsh shell hook and Claude Code hooks, is idempotent, and backs up every file it
-> edits. Then tell me in one line what it changed and how to undo it.
-
-Claude runs one script (you approve one command), then tells you exactly what
-changed. Bonus: that very session is the first thing you'll see appear in
-Joystick.
+On first launch, Joystick shows a **Connect Joystick** panel. Click **Enable** —
+it runs the bundled installer for you (idempotent, backs up every file it edits),
+shows you which steps wired up, and nudges you to open a new terminal. No terminal,
+no pasting.
 
 ## The manual way: run the script yourself
 
@@ -44,8 +36,8 @@ Requires `jq` for the Claude-hook merge: `brew install jq`.
    # <<< joystick <<<
    ```
 3. **`~/.claude/settings.json`** → merges Joystick's hooks into
-   `UserPromptSubmit`, `Stop`, `StopFailure`, `Notification`, `PostToolUse`,
-   `PostToolUseFailure` (your other hooks are left intact).
+   `UserPromptSubmit`, `PreToolUse`, `Stop`, `StopFailure`, `Notification`,
+   `PostToolUse`, `PostToolUseFailure` (your other hooks are left intact).
 
 Every edited file gets a `*.joystick-bak-<timestamp>` copy first. Re-running is
 safe — each step replaces its own block rather than duplicating it.
