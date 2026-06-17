@@ -1086,6 +1086,13 @@ extension Color {
     // pale tint would wash out. One knob to tune the whole-app directory color.
     static let dirTint = Color(hex: 0xC08497)
 
+    // Serving (◉) is ambient infrastructure that by definition never needs you,
+    // so it must be the QUIETEST state — not the loud Dracula success green
+    // (0x50fa7b) it used to borrow, which made always-up services pull the eye
+    // like a fresh ✓. A desaturated sage: still legibly "green = healthy/up",
+    // but settled into the background. One knob to tune how far serving recedes.
+    static let servingGreen = Color(hex: 0x6E9C7E)
+
     // Claude Code's /color agent palette is the Dracula colors (extracted from the
     // CLI binary) — NOT SwiftUI's stock .purple etc., which look noticeably off.
     // These are the 8 names /color offers; unknown/empty → nil (neutral pill).
@@ -1244,7 +1251,7 @@ struct OpRow: View {
                 // Deliberately small — the time is a glance detail; the command is
                 // the row's focus, not this.
                 .font(.system(size: 10, weight: .regular).monospacedDigit())
-                .foregroundStyle(op.isService ? Color.green
+                .foregroundStyle(op.isService ? Color.servingGreen
                                  : (op.isRunning && op.isClaude && !op.isWaiting) ? Color.claudeOrange
                                  : op.isRunning ? Color.accentColor : .secondary)
             // The ⌘1–9 jump keycap used to sit here; removed for now (it crowded the
@@ -1260,7 +1267,7 @@ struct OpRow: View {
             if op.isWaiting {
                 WaitingLight()         // soft yellow breathing light = needs you
             } else if op.isService {
-                Image(systemName: "antenna.radiowaves.left.and.right").foregroundStyle(.green)
+                Image(systemName: "antenna.radiowaves.left.and.right").foregroundStyle(Color.servingGreen)
             } else if op.isRunning && op.isClaude {
                 ClaudeThinkingIcon()   // twinkling sparkle while a turn is in flight
             } else if op.isRunning {
