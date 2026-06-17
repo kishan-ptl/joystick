@@ -67,6 +67,41 @@ fire "$(jq -cn --arg p "$NOTIF" '{hook_event_name:"UserPromptSubmit",session_id:
 check "task-notification labelled from summary" "$(grep '"id":"claude-s9"' "$LOG" | grep '"ev":"start"' | jq -r '.cmd' | tail -1)" '» Agent "Audit X" completed'
 check "raw notification XML not in row" "$(grep '"id":"claude-s9"' "$LOG" | grep -c 'task-notification')" "0"
 
+# Crash-safe drop path: a subagent's completion <task-notification> in the SAME
+# session must emit its subdone EXACTLY once and remove the marker. drop_agent
+# writes the clear BEFORE unlinking the marker, so an interrupt retries on the
+# next drain instead of stranding the line forever. (The drop grep needs a real
+# toolu_-prefixed id, unlike the labelling test above.)
+fire '{"hook_event_name":"UserPromptSubmit","session_id":"s11","cwd":"/tmp","prompt":"go"}'
+fire '{"hook_event_name":"PreToolUse","session_id":"s11","cwd":"/tmp","tool_name":"Task","tool_use_id":"toolu_t1","tool_input":{"description":"Audit X"}}'
+check "subagent marker created on dispatch" "$([[ -e $TMP/joystick/jagent-s11-toolu_t1 ]] && echo yes || echo no)" "yes"
+NOTIF2='<task-notification><tool-use-id>toolu_t1</tool-use-id><status>completed</status><summary>done</summary></task-notification>'
+fire "$(jq -cn --arg p "$NOTIF2" '{hook_event_name:"UserPromptSubmit",session_id:"s11",cwd:"/tmp",prompt:$p}')"
+check "completion emits subdone once" "$(grep '"id":"claude-s11"' "$LOG" | grep '"sub":"toolu_t1"' | grep -c '"subdone":true')" "1"
+check "marker cleared after drop" "$([[ -e $TMP/joystick/jagent-s11-toolu_t1 ]] && echo yes || echo no)" "no"
+
+# Drain-at-prompt backstop: a child whose completion <task-notification> landed in
+# the TRANSCRIPT (mid-turn, not delivered as its own prompt) is reconciled at the
+# NEXT prompt — clears the line without a timer, and only because the completion
+# actually landed.
+FIX2=$TMP/fix2.jsonl
+print -r -- '{"type":"queue-operation","content":"<task-notification><tool-use-id>toolu_t2</tool-use-id><status>completed</status></task-notification>"}' > "$FIX2"
+fire '{"hook_event_name":"UserPromptSubmit","session_id":"s12","cwd":"/tmp","prompt":"go"}'
+fire '{"hook_event_name":"PreToolUse","session_id":"s12","cwd":"/tmp","tool_name":"Task","tool_use_id":"toolu_t2","tool_input":{"description":"Bg agent"}}'
+fire "$(jq -cn --arg t "$FIX2" '{hook_event_name:"UserPromptSubmit",session_id:"s12",cwd:"/tmp",prompt:"next thing",transcript_path:$t}')"
+check "drain-at-prompt clears completed child" "$(grep '"id":"claude-s12"' "$LOG" | grep '"sub":"toolu_t2"' | grep -c '"subdone":true')" "1"
+check "drain-at-prompt cleared the marker" "$([[ -e $TMP/joystick/jagent-s12-toolu_t2 ]] && echo yes || echo no)" "no"
+
+# Feature-preserving property: a still-RUNNING child (no completion notification in
+# the transcript yet) must NOT be cleared at the next prompt — this is what makes
+# drain-at-prompt correct where a blind "clear on next prompt" would be wrong.
+EMPTY=$TMP/empty.jsonl; print -r -- '{"type":"user"}' > "$EMPTY"
+fire '{"hook_event_name":"UserPromptSubmit","session_id":"s13","cwd":"/tmp","prompt":"go"}'
+fire '{"hook_event_name":"PreToolUse","session_id":"s13","cwd":"/tmp","tool_name":"Task","tool_use_id":"toolu_t3","tool_input":{"description":"Long agent"}}'
+fire "$(jq -cn --arg t "$EMPTY" '{hook_event_name:"UserPromptSubmit",session_id:"s13",cwd:"/tmp",prompt:"keep going",transcript_path:$t}')"
+check "running child NOT cleared at next prompt" "$(grep '"id":"claude-s13"' "$LOG" | grep '"sub":"toolu_t3"' | grep -c '"subdone":true')" "0"
+check "running child marker survives" "$([[ -e $TMP/joystick/jagent-s13-toolu_t3 ]] && echo yes || echo no)" "yes"
+
 # meta event: title / mode / model / ctx extracted from the transcript.
 FIX=$TMP/fix.jsonl
 print -r -- '{"type":"ai-title","aiTitle":"My Topic","sessionId":"s7"}' >> "$FIX"

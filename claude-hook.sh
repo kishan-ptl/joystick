@@ -74,9 +74,15 @@ claude_transcript() {
 drop_shell() {
   local mk="${LOG:h}/jshell-$sid-$1"
   [[ -n $1 && -e $mk ]] || return 0
-  rm -f "$mk"
+  # Write the clear FIRST, drop the marker SECOND. If the hook is interrupted
+  # between them (Claude Code kills a hook that overruns its timeout — and the
+  # Stop-time drain loops over every tool_use_id), the marker survives and the
+  # next drain retries. The old rm-first order stranded the line forever on a
+  # crash (marker gone, no subdone); a rare duplicate subdone is harmless (the
+  # fold's removeAll is idempotent). $now is always set (top of script).
   jq -cn --arg id "$id" --arg sh "$1" --argjson ts "$now" \
     '{v:1,ev:"active",id:$id,shell:$sh,subdone:true,ts:$ts}' >> "$LOG"
+  rm -f "$mk"
 }
 
 # Drop one tracked subagent (emit its `subdone`) — the Task analogue of drop_shell,
@@ -88,9 +94,10 @@ drop_shell() {
 drop_agent() {
   local mk="${LOG:h}/jagent-$sid-$1"
   [[ -n $1 && -e $mk ]] || return 0
-  rm -f "$mk"
+  # Clear-then-unmark, same crash-safe order as drop_shell (see there).
   jq -cn --arg id "$id" --arg sub "$1" --argjson ts "$now" \
     '{v:1,ev:"active",id:$id,sub:$sub,subdone:true,ts:$ts}' >> "$LOG"
+  rm -f "$mk"
 }
 
 # Drain background work (shells AND subagents) that FINISHED — scan the transcript
@@ -239,14 +246,24 @@ case $event in
       # line for every tool_use_id the notification(s) carry — drop_shell and
       # drop_agent are each marker-guarded, so exactly the one that matches fires and
       # the other is a no-op. This is the fast path (idle completion → its own turn);
-      # mid-turn completions are caught by the Stop-time drain. Emitted BEFORE the
-      # turn's start so the finished line clears first.
+      # mid-turn completions are caught by the drain (Stop-time, and prompt-time just
+      # below). Emitted BEFORE the turn's start so the finished line clears first.
       print -r -- "$prompt" | grep -oE 'tool-use-id>toolu_[A-Za-z0-9]+' | sed 's/.*>//' \
         | while read -r tuid; do drop_shell "$tuid"; drop_agent "$tuid"; done
       sm=${prompt#*<summary>}; sm=${sm%%</summary>*}
       [[ $sm == "$prompt" || -z $sm ]] && sm="background agent finished"
       prompt=$sm
     fi
+    # Reconcile background work that finished during the PRIOR turn. The Stop-time
+    # drain usually catches a mid-turn completion and the fast path above catches one
+    # delivered as its own prompt — but re-draining here, at every prompt, is the
+    # cheap correct backstop that keeps a missed completion from stranding the line
+    # until pid death. It scans the transcript and clears ONLY children whose
+    # completion <task-notification> has actually landed, so a still-RUNNING agent
+    # keeps its line (the outlive-the-turn feature stays intact). When the session
+    # has no bg work in flight the marker glob short-circuits before any transcript
+    # scan, so a normal prompt's only added cost is resolving the path.
+    drain_finished_bg "$(claude_transcript)"
     _joystick_redact "$prompt"; prompt=$REPLY
     # Which Ghostty surface is this session in? The user just typed a prompt,
     # so the focused surface is ours. Cached per session id.
