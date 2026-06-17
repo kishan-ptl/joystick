@@ -1241,34 +1241,18 @@ struct OpRow: View {
             }
             Spacer(minLength: 12)
             Text(timeText)
-                // Deliberately small — the time is a glance detail that sits just
-                // left of the ⌘N helper; the command is the row's focus, not this.
+                // Deliberately small — the time is a glance detail; the command is
+                // the row's focus, not this.
                 .font(.system(size: 10, weight: .regular).monospacedDigit())
                 .foregroundStyle(op.isService ? Color.green
                                  : (op.isRunning && op.isClaude && !op.isWaiting) ? Color.claudeOrange
                                  : op.isRunning ? Color.accentColor : .secondary)
-            if showJumpSlot { jumpBadge }
+            // The ⌘1–9 jump keycap used to sit here; removed for now (it crowded the
+            // command's trailing edge). The shortcut still works via the key monitor,
+            // and the hint footer still documents it. jumpNumber/showJumpSlot are left
+            // wired up so restoring the keycap is a one-line change.
         }
         .padding(.vertical, 3)
-    }
-
-    // ⌘1–9 jump affordance: a quiet keycap at the row's trailing edge so the
-    // shortcut is discoverable. Only the first 9 rows get a number; the rest
-    // reserve the same width so the time column stays aligned.
-    @ViewBuilder
-    private var jumpBadge: some View {
-        if let n = jumpNumber {
-            Text("⌘\(n)")
-                .font(.system(size: 10, weight: .semibold, design: .rounded))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 2)
-                .background(Capsule().fill(Color.secondary.opacity(0.12)))
-                .overlay(Capsule().strokeBorder(Color.secondary.opacity(0.22), lineWidth: 0.5))
-                .frame(width: 30, alignment: .trailing)
-        } else {
-            Color.clear.frame(width: 30)
-        }
     }
 
     private var statusIcon: some View {
