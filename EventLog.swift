@@ -67,6 +67,7 @@ struct Op: Identifiable {
     var bgShells: [LiveChild] = []       // live: background shells (run_in_background) for this session; attached at render time from EventFold.bgShells. They OUTLIVE the turn that launched them, so like liveSubagents they're session-scoped, not per-op.
     var stallIdle: Double? = nil      // heuristic: tty quiet + fg proc asleep
     var isService = false             // fg process group holds a listening port
+    var ports: [Int] = []             // listening TCP ports the fg group holds (services only)
     var unseen = false                // finished, and surface not viewed since
     var summary: String? = nil        // Claude's closing blurb, on the end event
     var title = ""                    // session topic (from meta events), Claude rows

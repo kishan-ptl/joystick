@@ -73,7 +73,7 @@ final class Store: ObservableObject {
     nonisolated static let stallSecs = 20.0
     static let backstopSecs = 10.0   // safety-net reload cadence; the FS watch does the real work
 
-    enum TtyState: Sendable { case waiting(Double), service }
+    enum TtyState: Sendable { case waiting(Double), service([Int]) }
 
     private var ttyStates: [String: TtyState] = [:]
     private var lastStallCheck = Date.distantPast
@@ -361,7 +361,7 @@ final class Store: ObservableObject {
             if op.waitingSince == nil {
                 switch ttyStates[op.tty] {
                 case .waiting(let idle): op.stallIdle = idle
-                case .service: op.isService = true
+                case .service(let ports): op.isService = true; op.ports = ports
                 case nil: break
                 }
             }
@@ -923,23 +923,42 @@ final class Store: ObservableObject {
         }
         guard sawForeground else { return nil }
         // ps -t lists children too, so the yarn->node listener is seen.
-        if hasListeningSocket(pids: fgPids) { return .service }
+        let ports = listeningPorts(pids: fgPids)
+        if !ports.isEmpty { return .service(ports) }
         if busy || idle < stallSecs { return nil }
         return .waiting(idle)
     }
 
-    nonisolated static func hasListeningSocket(pids: [String]) -> Bool {
-        guard !pids.isEmpty else { return false }
+    // The listening TCP ports the given pids hold, sorted and de-duped. Empty ⇒
+    // not a service. Same lsof query we used to gate service detection, minus the
+    // `-t` (terse, pids-only) flag so we keep the address:port column we were
+    // throwing away — plus `-P -n` to keep ports/hosts numeric (no /etc/services
+    // name resolution, so "3000" not "hbci"; also faster). A process that listens
+    // on both IPv4 and IPv6 of one port shows two lines → the de-dupe collapses
+    // them. Cost is unchanged: one lsof call per probed tty, as before.
+    nonisolated static func listeningPorts(pids: [String]) -> [Int] {
+        guard !pids.isEmpty else { return [] }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        p.arguments = ["-a", "-p", pids.joined(separator: ","), "-iTCP", "-sTCP:LISTEN", "-t"]
+        p.arguments = ["-a", "-p", pids.joined(separator: ","), "-iTCP", "-sTCP:LISTEN", "-P", "-n"]
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = Pipe()
-        guard (try? p.run()) != nil else { return false }
+        guard (try? p.run()) != nil else { return [] }
         p.waitUntilExit()
-        let data = (try? pipe.fileHandleForReading.readToEnd()) ?? Data()
-        return !data.isEmpty
+        guard let data = try? pipe.fileHandleForReading.readToEnd(),
+              let out = String(data: data, encoding: .utf8) else { return [] }
+        var ports: [Int] = []
+        for line in out.split(separator: "\n") where line.contains("(LISTEN)") {
+            // NAME column is "TCP <addr>:<port>"; the addr:port token (e.g. *:3000,
+            // 127.0.0.1:3000, [::1]:3000) sits just before the "(LISTEN)" token.
+            let toks = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+            guard let li = toks.firstIndex(of: "(LISTEN)"), li > 0,
+                  let colon = toks[li - 1].lastIndex(of: ":") else { continue }
+            if let port = Int(toks[li - 1][toks[li - 1].index(after: colon)...]),
+               !ports.contains(port) { ports.append(port) }
+        }
+        return ports.sorted()
     }
 
     // Notify once per op when it first enters a stall-detected waiting state.
@@ -1310,7 +1329,8 @@ struct OpRow: View {
         } else if op.isRunning, let act = op.activity, !act.isEmpty {
             parts.append(Text("⚙ \(act)"))       // live agent activity (PostToolUse)
         } else if op.isService {
-            parts.append(Text("serving"))
+            let p = op.ports.map { ":\($0)" }.joined(separator: " ")
+            parts.append(Text(p.isEmpty ? "serving" : "serving \(p)"))
         }
         // Background shells (run_in_background) run alongside whatever the turn is
         // doing and outlive it, so they get their own segment — not part of the
@@ -1538,6 +1558,21 @@ struct GroupRow: View {
         .help("Click to focus this tab in Ghostty · right-click to copy")
         .contextMenu {
             copyMenu(for: group.current)
+            // A serving row holds one+ listening ports (parsed from lsof). Offer to
+            // open each as http://localhost:<port>. Deliberately one explicit click
+            // per port, NOT the row's primary click (that focuses the tab) and NOT
+            // auto-linkified — a LISTEN socket may be Postgres/Redis/a debugger, not
+            // a web server, so the user decides which to open rather than us guessing.
+            if group.current.isService, !group.current.ports.isEmpty {
+                Divider()
+                ForEach(group.current.ports, id: \.self) { port in
+                    Button {
+                        if let url = URL(string: "http://localhost:\(port)") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    } label: { Label("Open localhost:\(port)", systemImage: "safari") }
+                }
+            }
             // Hand-reordering lives only in the keyboard-nav window (the menubar
             // keeps its prioritized sort). Mirrors ⌘↑/⌘↓ and wraps, so even the
             // top/bottom row can Move Up/Down (to the other end).

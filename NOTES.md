@@ -452,6 +452,15 @@ Terminal taxonomy: idle / running an op / hosting a service / interactive app
   green (menubar), "serving" subtitle, green uptime, sorted below active ops;
   header reads "N running · M serving · K needs you". Verified live: caught
   ngrok http with zero config, not just yarn dev.
+- Ports on the row — SHIPPED 2026-06-17: the serving subtitle now reads
+  "serving :3000" (listening port(s)). Free: the existing detection lsof call
+  already returned the address:port column — we were discarding it with `-t`
+  (pids-only). Dropped `-t`, added `-P -n` to keep ports numeric, parse the
+  addr:port token before "(LISTEN)", de-dupe IPv4/IPv6 of one port. Same cost.
+  Right-click → "Open localhost:<port>" per port. Deliberately NOT auto-linkified
+  and NOT the primary click (that focuses the tab): a LISTEN socket may be
+  Postgres/Redis/a node --inspect debugger, not a web server, so the user picks
+  which to open — keeps faith with "no heuristics / fully predictable".
 - Future: quiet endings — no done-notification/unseen badge when a service
   is intentionally Ctrl-C'd (exit -1/130).
 
