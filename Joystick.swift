@@ -1308,7 +1308,21 @@ struct OpRow: View {
         if !op.isRunning, !op.liveSubagents.isEmpty {
             parts.append(Text("⟳ \(op.liveSubagents.count) bg"))
         }
-        parts.append(Text(tilde(op.cwd)))
+        // Directory: brighten the leaf folder (the identifying project name)
+        // and leave the parent path at the dimmer secondary grey, so the eye
+        // lands on "which project" without spending a new color. Two Text runs
+        // interpolated together (not `+`, deprecated) so each keeps its own
+        // weight/color — same trick the ctx segment uses. .foregroundColor (not
+        // .foregroundStyle) because it returns Text, which stays concatenable.
+        let path = tilde(op.cwd)
+        if let slash = path.lastIndex(of: "/"),
+           case let leafStart = path.index(after: slash), leafStart < path.endIndex {
+            let parent = Text(String(path[..<leafStart]))
+            let leaf = Text(String(path[leafStart...])).fontWeight(.semibold).foregroundColor(.primary)
+            parts.append(Text("\(parent)\(leaf)"))
+        } else {
+            parts.append(Text(path).fontWeight(.semibold).foregroundColor(.primary))
+        }
         if !op.tty.isEmpty { parts.append(Text(op.tty)) }
         if let code = op.exitCode, code != 0 {
             parts.append(Text(code == -1 ? "killed" : "exit \(code)"))
