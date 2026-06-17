@@ -456,7 +456,14 @@ final class Store: ObservableObject {
         var idle: [SurfaceGroup] = []
         for key in order {
             let g = bySurface[key]!
-            if g.current.isRunning { active.append(g) } else { idle.append(g) }
+            // A session with live background work — shells (run_in_background) or
+            // subagents still running after the turn closed — is still WORKING, so
+            // it stays in the active (Running) section instead of dropping to
+            // Finished the instant its turn ends. Keeps such a row pinned in one
+            // place rather than teleporting between sections as the turn flips.
+            let liveBg = !(fold.bgShells[key]?.isEmpty ?? true)
+                || !(fold.subagents[key]?.isEmpty ?? true)
+            if g.current.isRunning || liveBg { active.append(g) } else { idle.append(g) }
         }
         // Waiting terminals on top, longest-BLOCKED first (the needs-you inbox),
         // then active ops, then services (ambient).
@@ -1072,6 +1079,13 @@ extension Color {
     static let ctxWarn = Color(hex: 0xFFC107)
     static let ctxDanger = Color(hex: 0xff5858)
 
+    // Directory path tint: warm but desaturated dusty-rose, deliberately OFF the
+    // warm STATE hues (gold 0xFFC107 = waiting / ctx-warn, terracotta claudeOrange
+    // = Claude working) so a tinted path reads as a label, never as "needs you".
+    // Mid-tone, so it carries on both the light and dark window vibrancy where a
+    // pale tint would wash out. One knob to tune the whole-app directory color.
+    static let dirTint = Color(hex: 0xC08497)
+
     // Claude Code's /color agent palette is the Dracula colors (extracted from the
     // CLI binary) — NOT SwiftUI's stock .purple etc., which look noticeably off.
     // These are the 8 names /color offers; unknown/empty → nil (neutral pill).
@@ -1308,13 +1322,11 @@ struct OpRow: View {
         if !op.isRunning, !op.liveSubagents.isEmpty {
             parts.append(Text("⟳ \(op.liveSubagents.count) bg"))
         }
-        // Directory: lift the whole path a notch above the subtitle's secondary
-        // grey so it's easy to scan for "which project" this row is — brighter
-        // than the surrounding metadata, but kept below full .primary so it stays
-        // calm and doesn't compete with the command line. No new color spent.
-        // .foregroundColor (not .foregroundStyle) so the run stays concatenable
-        // into the " · " chain.
-        parts.append(Text(tilde(op.cwd)).foregroundColor(.primary.opacity(0.75)))
+        // Directory: tint the whole path with a warm, desaturated dirTint so it
+        // reads as its own thing — easy to scan for "which project" this row is —
+        // without claiming a STATE color (see Color.dirTint). .foregroundColor
+        // (not .foregroundStyle) so the run stays concatenable into the " · " chain.
+        parts.append(Text(tilde(op.cwd)).foregroundColor(.dirTint))
         if !op.tty.isEmpty { parts.append(Text(op.tty)) }
         if let code = op.exitCode, code != 0 {
             parts.append(Text(code == -1 ? "killed" : "exit \(code)"))
