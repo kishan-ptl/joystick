@@ -308,6 +308,52 @@ Deliberately NOT done: bypassing `doneWindowSecs` (6h) for a done row with pendi
 agents. Matches bg-shells (which didn't either); 6h is generous and the symmetry is
 worth more than the edge case of an agent running > 6h.
 
+## Lingering subagent/shell lines — the lost-`subdone` strand (2026-06-16)
+
+Symptom: a Claude row showed phantom `⚙ N agents running` / `⟳ N bg` for subagents
+that finished HOURS earlier. Found live: the active `oasis` session was carrying 3
+subagent lines from 11–13h prior; a second alive session carried one from 12h.
+
+Root cause — two compounding gaps:
+1. The "residual risk" flagged in the bg-agents note above is not actually bounded
+   for a **live** session. The session-scoped child clears only on its completion
+   `subdone`; if that signal is lost the line lingers until pid death / supersede /
+   reset — but a Claude session's pid outlives every turn, so on an active session
+   none of those ever fire. (`pruneOpen` reaps stale *open ops* by liveness, but
+   subagents/shells have no pid we track, so there's no liveness signal for them.)
+2. The signal got lost because `drop_agent`/`drop_shell` did `rm marker` BEFORE
+   appending `subdone`. A hook killed for overrunning its timeout (the Stop-time
+   drain loops over every tool_use_id, each a jq spawn) between the two left the
+   marker gone with no clear — unrecoverable, AND it gated off every later drain
+   (the drain's cheap-exit is "no markers → return"). Confirmed in the log: the 3
+   stranded subagents had their `start` line, no `subdone`, and markers already gone.
+
+Fix (both in the emitter — the layer that owns the signal; no viewer change):
+- **Crash-safe drop (the root fix):** reorder both `drop_*` to append `subdone`
+  THEN `rm` the marker. An interrupt now leaves the marker intact, so the next
+  drain retries instead of stranding; a rare duplicate `subdone` is idempotent in
+  the fold (`removeAll`). This is what actually broke here.
+- **Drain at next prompt (backstop):** also call `drain_finished_bg` at
+  `UserPromptSubmit`, not just at Stop. Every prompt reconciles any background work
+  that finished during the prior turn. It's marker-gated, so a normal prompt with
+  no bg work in flight pays nothing.
+
+Why this and not a wall-clock age-reap (considered, rejected): an age timer can't
+tell "agent still running" from "signal lost", so it would clip a genuinely
+long-running bg shell/agent off the display — and picking the window is a guess
+(NOTES already notes a `run_in_background` shell can run for hours). The drain looks
+before it clears: it drops ONLY children whose completion `<task-notification>` has
+actually landed in the transcript, so a still-running agent keeps its line and the
+outlive-the-turn feature stays intact. Idle completions already wake the session as
+their own prompt (the fast path), so they're covered too.
+
+Residual: a completion `<task-notification>` that is NEVER written would still
+strand a line until pid death — but we've seen no such case (every completion fired
+a notification; the strand was the rm-first bug). If it ever appears, a generous
+liveness/age net is the place to add it. The pre-existing stranded lines clear
+themselves: their session's next prompt re-drains and finds the (already-present)
+notification.
+
 ## Cleared-session orphan row — /clear rotates the session id (2026-06-15)
 
 Symptom: after `/clear`, the terminal's row keeps showing the PREVIOUS prompt (a
