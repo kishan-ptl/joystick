@@ -1457,10 +1457,10 @@ struct GroupRow: View {
     var moveRow: (Int) -> Void = { _ in }   // -1 = up, +1 = down
     let action: () -> Void
 
-    // .key only when OUR window is the key window. The selection border means
+    // .key only when OUR window is the key window. The selection fill means
     // "arrow keys steer this row" — true ONLY while we hold keyboard focus — so
     // we fade it when we don't, matching the macOS active/inactive-selection
-    // convention. Without this the vivid border lingers while you're in Ghostty
+    // convention. Without this the vivid fill lingers while you're in Ghostty
     // and invites arrow presses that go nowhere.
     @Environment(\.controlActiveState) private var controlActiveState
 
@@ -1641,27 +1641,20 @@ struct GroupRow: View {
                 }
             }
         }
-        // Two independent, visually-distinct markers so they can stack rather
-        // than fight for the row: the keyboard cursor is an accent BORDER (a
-        // rounded outline, not a leading bar — a bar sat on top of the blue
-        // unseen-result dot and read as one smudged marker), and "you are here"
-        // (the focused Ghostty tab) is a neutral-grey FILL (the system's
-        // inactive-selection colour). A border vs a fill keeps them legible when
-        // the selected row IS the focused tab — you see grey fill + blue outline
-        // at once — and grey stays quiet so neither competes with the ✋/▶/◉/✓/✗.
+        // The keyboard cursor is an accent-tinted FILL across the whole row, not
+        // a leading bar — a leading bar sat right on top of the blue unseen-
+        // result dot (both at the row's leading edge, both blue) and read as one
+        // smudged marker. Priority: selection (accent) beats "you are here"
+        // (neutral grey, the system's inactive-selection fill) beats nothing. The
+        // hue difference (blue vs grey) tells the cursor from the tab-you're-in,
+        // and grey stays quiet so neither competes with the ✋/▶/◉/✓/✗ glyphs.
+        // The accent fill fades when our window isn't key: the cursor only moves
+        // under the arrow keys while we hold focus, so a faint fill signals that
+        // a keypress would land in Ghostty, not here.
         .listRowBackground(
-            ZStack {
-                if isFocused {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(Color(nsColor: .unemphasizedSelectedContentBackgroundColor).opacity(0.5))
-                }
-                if isSelected {
-                    let keyWindow = controlActiveState == .key
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .strokeBorder(Color.accentColor.opacity(keyWindow ? 1 : 0.3),
-                                      lineWidth: keyWindow ? 1.5 : 1)
-                }
-            }
+            isSelected ? Color.accentColor.opacity(controlActiveState == .key ? 0.28 : 0.12)
+            : isFocused ? Color(nsColor: .unemphasizedSelectedContentBackgroundColor).opacity(0.5)
+            : Color.clear
         )
     }
 
