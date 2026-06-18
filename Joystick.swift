@@ -1457,6 +1457,13 @@ struct GroupRow: View {
     var moveRow: (Int) -> Void = { _ in }   // -1 = up, +1 = down
     let action: () -> Void
 
+    // .key only when OUR window is the key window. The selection border means
+    // "arrow keys steer this row" — true ONLY while we hold keyboard focus — so
+    // we fade it when we don't, matching the macOS active/inactive-selection
+    // convention. Without this the vivid border lingers while you're in Ghostty
+    // and invites arrow presses that go nowhere.
+    @Environment(\.controlActiveState) private var controlActiveState
+
     // Is this the Ghostty tab/split focused right now? Shell rows group BY
     // surface (group.key), so that's an exact hit. Claude rows group by
     // claude-<sid> and carry only a best-effort surface snapshot on current.surface
@@ -1649,8 +1656,10 @@ struct GroupRow: View {
                         .fill(Color(nsColor: .unemphasizedSelectedContentBackgroundColor).opacity(0.5))
                 }
                 if isSelected {
+                    let keyWindow = controlActiveState == .key
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .strokeBorder(Color.accentColor, lineWidth: 1.5)
+                        .strokeBorder(Color.accentColor.opacity(keyWindow ? 1 : 0.3),
+                                      lineWidth: keyWindow ? 1.5 : 1)
                 }
             }
         )
