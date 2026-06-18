@@ -498,7 +498,7 @@ final class Store: ObservableObject {
                 g.current.title = m.title; g.current.model = m.model
                 g.current.mode = m.mode; g.current.ctxTokens = m.ctx
                 g.current.sessionName = m.name; g.current.agentColor = m.color
-                g.current.worktree = m.wt
+                g.current.worktree = m.wt; g.current.goal = m.goal
             }
             // Background shells and subagents are session-scoped and outlive the
             // launching turn, so attach them whatever the current op's state (a running
@@ -1245,6 +1245,34 @@ struct WorktreeChip: View {
     }
 }
 
+// The session's GOAL — the `/goal` completion condition it's working toward.
+// Where the worktree chip says WHERE a session lives and the rename pill says
+// WHO it is, this says WHAT it's trying to achieve, so it's the most prominent
+// thing in the eyebrow: full-strength text on a quiet capsule, and it stands in
+// for the auto-topic rather than crowding beside it. The target glyph carries
+// the meaning. Deliberately NOT a status-light hue (yellow/blue/green) — a goal
+// is an intent, not a state, so it stays out of that grammar.
+struct GoalChip: View {
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "target")
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text(text)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Color.secondary.opacity(0.12), in: Capsule())
+        .overlay(Capsule().strokeBorder(Color.secondary.opacity(0.3), lineWidth: 0.5))
+        .help("goal: \(text)")
+    }
+}
+
 struct OpRow: View {
     let op: Op
     let nowTs: Double
@@ -1450,13 +1478,17 @@ struct GroupRow: View {
         // and copy lives in the right-click menu (whole command / directory).
         VStack(alignment: .leading, spacing: 1) {
             // Eyebrow above the prompt: the worktree chip (if this session runs
-            // in a linked git worktree) + your rename pill (if set) + Claude's
-            // auto-generated session topic. The prompt stays the label below.
-            // The rename pill is tinted by the session's agent color.
+            // in a linked git worktree) + your rename pill (if set) + the session
+            // goal chip (if a `/goal` is set) OR Claude's auto-generated topic.
+            // The prompt stays the label below; the rename pill is tinted by the
+            // session's agent color. A set goal SUPERSEDES the auto-topic — it's
+            // the session's own stated objective, a truer summary than the
+            // inferred title — so the two never show together.
             let badgeName = group.current.sessionName
-            let topic = group.current.title
+            let goal = group.current.goal
+            let topic = goal.isEmpty ? group.current.title : ""
             let worktree = group.current.worktree
-            if !worktree.isEmpty || !badgeName.isEmpty || !topic.isEmpty {
+            if !worktree.isEmpty || !badgeName.isEmpty || !goal.isEmpty || !topic.isEmpty {
                 HStack(spacing: 6) {
                     Spacer().frame(width: 43)   // align under the command text
                     if !worktree.isEmpty {
@@ -1465,6 +1497,9 @@ struct GroupRow: View {
                     if !badgeName.isEmpty {
                         SessionEyebrow(name: badgeName,
                                        tint: Color.claudeAgent(group.current.agentColor))
+                    }
+                    if !goal.isEmpty {
+                        GoalChip(text: goal)
                     }
                     if !topic.isEmpty {
                         Text(topic)

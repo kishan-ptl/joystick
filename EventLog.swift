@@ -38,6 +38,7 @@ struct RawEvent: Decodable {
     let name: String?      // user-set session title (rename), on `meta` events
     let color: String?     // user-set session color (agent color), on `meta` events
     let wt: String?        // git worktree leaf the session runs in (linked worktrees only), on `meta` events
+    let goal: String?      // session goal (the `/goal` completion condition), on `meta` events; absent/empty when unset or met
 }
 
 // A subagent (Task) running inside a Claude turn. Keyed by the Task's tool_use_id
@@ -77,6 +78,7 @@ struct Op: Identifiable {
     var sessionName = ""              // user-given session title (rename), from meta
     var agentColor = ""               // user-given session color name, from meta
     var worktree = ""                 // git worktree leaf (linked worktrees only), from meta
+    var goal = ""                     // session goal (the `/goal` completion condition), from meta; "" when unset or met
 
     var id: String { "\(key)#\(seq)" }
     var isRunning: Bool { endTs == nil }
@@ -101,7 +103,7 @@ struct SurfaceGroup: Identifiable {
 }
 
 // Per-session metadata from the transcript (`meta` events), keyed by claude-<sid>.
-struct SessionMeta { var title = ""; var model = ""; var mode = ""; var ctx: Double = 0; var name = ""; var color = ""; var wt = "" }
+struct SessionMeta { var title = ""; var model = ""; var mode = ""; var ctx: Double = 0; var name = ""; var color = ""; var wt = ""; var goal = "" }
 
 // MARK: - EventFold
 
@@ -229,7 +231,7 @@ struct EventFold {
             meta[e.id] = SessionMeta(title: e.title ?? "", model: e.model ?? "",
                                      mode: e.mode ?? "", ctx: e.ctx ?? 0,
                                      name: e.name ?? "", color: e.color ?? "",
-                                     wt: e.wt ?? "")
+                                     wt: e.wt ?? "", goal: e.goal ?? "")
         case "reset":
             // A new Claude session took over this terminal — /clear, /resume and
             // /compact each rotate to a new claude-<sid> on the SAME claude process

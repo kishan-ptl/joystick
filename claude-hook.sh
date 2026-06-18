@@ -191,7 +191,7 @@ worktree_name() {  # $1 = dir
 # input + cache_read + cache_creation). Runs on turn close (async).
 # $1 = the transcript path close_turn already resolved (empty if none).
 emit_meta() {  # $1 = transcript path (may be empty)
-  local tpath=$1 title mode model ctx name color wt
+  local tpath=$1 title mode model ctx name color wt goal
   [[ -n $tpath ]] || return 0
   title=$(grep -F '"type":"ai-title"' "$tpath" 2>/dev/null | tail -1 | jq -r '.aiTitle // empty' 2>/dev/null)
   mode=$(grep -F '"type":"permission-mode"' "$tpath" 2>/dev/null | tail -1 | jq -r '.permissionMode // empty' 2>/dev/null)
@@ -208,9 +208,20 @@ emit_meta() {  # $1 = transcript path (may be empty)
   # Worktree leaf: a path component (already present unredacted in `cwd`), so
   # cap only — no redaction needed; the cap keeps the line < PIPE_BUF.
   wt=$(worktree_name "$cwd"); wt=${wt[1,40]}
+  # The /goal completion condition, if one is set and not yet met. /goal records
+  # an `attachment` entry carrying a nested goal_status object; we read the LAST
+  # one's condition and emit nothing once it's met (met:true) so a finished goal
+  # clears off the row. The jq `select` (not grep alone) is load-bearing: plain
+  # transcript chat text can contain "goal_status", so we structurally select the
+  # real attachment entries and take the last — never a chat-text false match.
+  goal=$(grep -F '"goal_status"' "$tpath" 2>/dev/null \
+    | jq -r 'select(.attachment.type=="goal_status")
+             | if .attachment.met == true then "" else (.attachment.condition // "") end' 2>/dev/null \
+    | tail -1)
+  [[ -n $goal ]] && { _joystick_redact "$goal"; goal=${REPLY[1,80]}; }
   jq -cn --arg id "$id" --arg title "${title:-}" --arg model "${model:-}" --arg mode "${mode:-}" \
-    --arg name "${name:-}" --arg color "${color:-}" --arg wt "${wt:-}" --argjson ctx "${ctx:-0}" --argjson ts "$now" \
-    '{v:1,ev:"meta",id:$id,title:$title,model:$model,mode:$mode,name:$name,color:$color,wt:$wt,ctx:$ctx,ts:$ts}' >> "$LOG"
+    --arg name "${name:-}" --arg color "${color:-}" --arg wt "${wt:-}" --arg goal "${goal:-}" --argjson ctx "${ctx:-0}" --argjson ts "$now" \
+    '{v:1,ev:"meta",id:$id,title:$title,model:$model,mode:$mode,name:$name,color:$color,wt:$wt,goal:$goal,ctx:$ctx,ts:$ts}' >> "$LOG"
 }
 
 case $event in

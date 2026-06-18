@@ -33,7 +33,8 @@ Each operation is two events sharing an `id` — a `start` and an `end`.
 // meta  (Claude only — emitted on turn close; session-level, not per-turn)
 //        (name/color optional — a deliberate rename + agent color; shown as a row badge)
 //        (wt optional — git worktree leaf when the session runs in a LINKED worktree; shown as a row chip)
-{"v":1,"ev":"meta","id":"<id>","title":"<topic>","model":"<id>","mode":"<perm-mode>","name":"<rename>","color":"<palette>","wt":"<worktree>","ctx":<tokens>,"ts":<unix>}
+//        (goal optional — the `/goal` completion condition; shown as a row chip, superseding the auto-topic. Absent/empty when unset or met)
+{"v":1,"ev":"meta","id":"<id>","title":"<topic>","model":"<id>","mode":"<perm-mode>","name":"<rename>","color":"<palette>","wt":"<worktree>","goal":"<condition>","ctx":<tokens>,"ts":<unix>}
 // reset  (Claude only — emitted on /clear|/resume|/compact, before any prompt)
 //        A new session took over this terminal: id = the NEW claude-<sid>, pid = the
 //        (unchanged) claude process. Retires any earlier session's row on that pid NOW,
@@ -67,6 +68,7 @@ Each operation is two events sharing an `id` — a `start` and an `end`.
 | `title` / `model` / `mode` / `ctx` | `meta` only — session topic, model id, permission mode, context-window tokens used |
 | `name` / `color` | `meta` only — user-set session rename (**sanitized**) + agent color name; shown as a row badge. Empty/absent when unset |
 | `wt` | `meta` only — git worktree leaf (the worktree directory's basename) when the session runs in a LINKED worktree; shown as a row chip. Empty/absent on the main checkout |
+| `goal` | `meta` only — the session's `/goal` completion condition (**sanitized**); shown as a row chip that supersedes the auto-topic. Empty/absent when no goal is set or it has been met |
 
 ## Producers
 
