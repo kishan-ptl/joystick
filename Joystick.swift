@@ -1932,6 +1932,16 @@ struct ContentView: View {
 
     private var opList: some View {
         let nowTs = store.now.timeIntervalSince1970
+        // A calm collapse when a terminal's surface closes: a row leaving the
+        // list fades while the rows below slide up to close the gap, mirroring
+        // the Ghostty tab closing rather than snapping out. Keyed to the group
+        // ids (stable surface id / claude-<sid>), so it fires ONLY on membership
+        // and order changes — never on the 1 Hz relabel of an existing row.
+        // The menubar token folds in the Running/Finished split so a row floating
+        // up to "needs you" or settling into Finished glides too.
+        let animToken: [String] = keyboardNav
+            ? store.visibleGroups.map(\.id)
+            : store.activeGroups.map(\.id) + ["—"] + store.idleGroups.map(\.id)
         return ScrollViewReader { proxy in
             List {
                 if keyboardNav {
@@ -1969,6 +1979,7 @@ struct ContentView: View {
             }
             .listStyle(.inset)
             .scrollContentBackground(.hidden)   // let the window's vibrancy show through the rows
+            .animation(.easeOut(duration: 0.22), value: animToken)
             // Keep the keyboard cursor on screen as it moves through a long list.
             .onChange(of: store.selectedKey) { _, key in
                 guard keyboardNav, let key else { return }
