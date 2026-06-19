@@ -1420,9 +1420,14 @@ struct OpRow: View {
                 let limit = op.ctxTokens > 200_000 ? 1_000_000.0 : 200_000.0
                 let pct = Int((op.ctxTokens / limit) * 100)
                 var seg = Text("\(pct)% ctx")
+                let hot = pct >= 80   // gold/red — getting full, you need to see it now
                 if pct >= 90 { seg = seg.foregroundColor(.ctxDanger) }       // running out of room
                 else if pct >= 80 { seg = seg.foregroundColor(.ctxWarn) }    // getting full
-                parts.append(seg)
+                // Calm ctx is just one more grey segment, fine to truncate off the
+                // right edge of this single-line chain. But once it's gold/red,
+                // lift it to the front so the warning can't be the thing that gets
+                // truncated away exactly when the session is about to run out of room.
+                if hot { parts.insert(seg, at: 0) } else { parts.append(seg) }
             }
             if !op.model.isEmpty { parts.append(Text(shortModel(op.model))) }
             if op.mode == "bypassPermissions" { parts.append(Text("⚠ bypass")) }
