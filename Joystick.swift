@@ -67,6 +67,8 @@ final class Store: ObservableObject {
     static let minDoneSecs = 10.0
     static let doneWindowSecs = 6.0 * 3600
     static let externalTTL = 24.0 * 3600   // running `joystick log` ops dropped after this with no end
+    static let pidReuseMargin = 120.0      // slack for the pid-reuse identity check (alive()); a host that
+                                           // started >2min after its op began is a recycled pid, not ours
     static let maxDone = 20
     static let historyCap = 3
     static let ignore: Set<String> = ["claude", "claude2", "vim", "nvim", "less", "man", "top", "htop", "tmux"]
@@ -401,7 +403,7 @@ final class Store: ObservableObject {
         // sole arbiter for these rows, per Principle #1. See NOTES.md.
         var liveClaude: [Op] = [], rest: [Op] = []
         for op in shown {
-            if op.isClaude && alive(op.pid) { liveClaude.append(op) } else { rest.append(op) }
+            if op.isClaude && alive(op.pid, since: op.start) { liveClaude.append(op) } else { rest.append(op) }
         }
         let capped = Array(rest
             .filter { nowTs - ($0.endTs ?? 0) <= Self.doneWindowSecs }
@@ -426,7 +428,7 @@ final class Store: ObservableObject {
         pollLiveSurfaces()
         finished.removeAll { op in
             if op.isExternal { return false }
-            if op.isClaude { return !alive(op.pid) }
+            if op.isClaude { return !alive(op.pid, since: op.start) }
             guard let live = liveSurfaces else { return false }
             return !live.contains(op.surface)
         }
@@ -868,9 +870,32 @@ final class Store: ObservableObject {
         return Self.ignore.contains(first)
     }
 
-    private func alive(_ pid: Int32) -> Bool {
-        guard pid > 0 else { return false }
-        return kill(pid, 0) == 0 || errno == EPERM
+    // kill(pid,0) proves only that SOME process holds this number right now — not
+    // that it's STILL ours. macOS recycles pids, so a long-gone session's pid can
+    // resurface as an unrelated daemon and pin a dead row open forever (seen in the
+    // wild: a closed Claude session whose pid 5418 came back as `seputil`, its row
+    // stuck at "waiting on your reply" for a day). `opStart` lets us confirm
+    // identity: a host process must predate the op it runs, so a process that
+    // started AFTER the op began can't be the real host. The margin absorbs the
+    // sub-second case where a session's first event lands in the same whole-clock
+    // second its process launched (the log clock is whole seconds). Callers that
+    // pass no opStart (default 0) get the old existence-only check.
+    private func alive(_ pid: Int32, since opStart: Double = 0) -> Bool {
+        guard pid > 0, kill(pid, 0) == 0 || errno == EPERM else { return false }
+        guard opStart > 0, let started = procStartTime(pid) else { return true }
+        return started <= opStart + Self.pidReuseMargin
+    }
+
+    // Wall-clock start time of pid's CURRENT process (epoch seconds), or nil if it
+    // can't be read. sysctl(KERN_PROC_PID) — a single syscall, no subprocess. Used
+    // only to defeat pid reuse in `alive` above.
+    private func procStartTime(_ pid: Int32) -> Double? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return nil }
+        let tv = info.kp_proc.p_starttime
+        return Double(tv.tv_sec) + Double(tv.tv_usec) / 1_000_000
     }
 
     // Is an open op's host still around? A shell/Claude op lives while its process
@@ -879,7 +904,7 @@ final class Store: ObservableObject {
     // filter, the active-tick liveOpen check, and fold pruning all gate on
     // this, so "hidden from the view" and "freed from memory" can't drift apart.
     private func opHostAlive(_ op: Op, nowTs: Double) -> Bool {
-        op.isExternal ? (nowTs - op.start < Self.externalTTL) : alive(op.pid)
+        op.isExternal ? (nowTs - op.start < Self.externalTTL) : alive(op.pid, since: op.start)
     }
 
     // Classifies what a tty's foreground is doing:
