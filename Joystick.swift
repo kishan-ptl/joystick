@@ -1806,7 +1806,7 @@ struct PermissionBanner: View {
 struct ContentView: View {
     @EnvironmentObject var store: Store
     @Environment(\.openWindow) private var openWindow
-    @State private var floatOnTop = true
+    @State private var floatOnTop = false
     @FocusState private var searchFocused: Bool
     @State private var keyMonitor: Any?
 
@@ -1852,8 +1852,8 @@ struct ContentView: View {
             store.refreshAutomation()
             store.reload()
             // Apply the default pin state — onChange only fires on a *change*,
-            // so without this the toggle would read "on" while windows stayed
-            // at .normal until the first manual toggle.
+            // so without this the toggle and the actual window level could drift
+            // apart until the first manual toggle.
             for w in NSApp.windows { w.level = floatOnTop ? .floating : .normal }
             if keyboardNav {
                 Summoner.shared.reopen = { openWindow(id: "main") }

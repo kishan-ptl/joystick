@@ -9,6 +9,7 @@ APP="${JOYSTICK_APP:-$HOME/Applications/Joystick.app}"
 
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$DIR/Joystick-Info.plist" "$APP/Contents/Info.plist"
+cp "$DIR/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 # Ship the emitter scripts + installer inside the bundle. First-run onboarding
 # ("Copy setup prompt" → Claude Code) runs Resources/install.sh, which copies
 # these out to $JOYSTICK_HOME and wires up the shell + Claude hooks.
