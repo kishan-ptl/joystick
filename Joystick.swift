@@ -1150,11 +1150,11 @@ extension Color {
     static let servingGreen = Color(hex: 0x6E9C7E)
 
     // Claude's auto-generated topic (the inferred session-title eyebrow above a
-    // row) — a very pale, desaturated yellow so the inferred summary reads as a
-    // soft warm tint, set apart from the neutral-grey prompt and metadata without
-    // pulling the eye like the warm STATE hues. Kept subtle (low saturation, near
-    // white) so it recedes on the window vibrancy rather than announcing itself.
-    static let summaryYellow = Color(hex: 0xE6E1C0)
+    // row) — a pale gold so the inferred summary reads as a soft warm tint, set
+    // apart from the neutral-grey prompt and metadata without pulling the eye like
+    // the warm STATE hues. Kept subtle so it recedes on the window vibrancy rather
+    // than announcing itself.
+    static let summaryYellow = Color(hex: 0xDCC98F)
 
     // Claude Code's /color agent palette is the Dracula colors (extracted from the
     // CLI binary) — NOT SwiftUI's stock .purple etc., which look noticeably off.
