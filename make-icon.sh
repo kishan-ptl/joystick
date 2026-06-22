@@ -13,9 +13,15 @@ mkdir -p "$ICONSET"
 # Build a 1024 master (squircle-masked, padded) then downscale to each size.
 python3 - "$SRC" "$ICONSET" <<'PY'
 import sys
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageCms
 
 src_path, iconset = sys.argv[1], sys.argv[2]
+
+# Tag every layer sRGB. Without a profile macOS renders the icon against the
+# display's native (wide-gamut) space, so the dark mark looks lighter on the
+# Dock than the sRGB-tagged source artwork. Embedding sRGB makes the OS
+# color-manage the icon identically to the source PNG.
+SRGB = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
 
 CANVAS = 1024          # master canvas
 MARGIN = 100           # transparent margin each side (macOS icon grid)
@@ -46,7 +52,7 @@ pairs = [(16,"icon_16x16.png"),(32,"icon_16x16@2x.png"),(32,"icon_32x32.png"),
          (256,"icon_256x256.png"),(512,"icon_256x256@2x.png"),(512,"icon_512x512.png"),
          (1024,"icon_512x512@2x.png")]
 for s, name in pairs:
-    master.resize((s, s), Image.LANCZOS).save(f"{iconset}/{name}")
+    master.resize((s, s), Image.LANCZOS).save(f"{iconset}/{name}", icc_profile=SRGB)
 print("iconset ready")
 PY
 
