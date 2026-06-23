@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="icon.png" alt="Joystick app icon" width="120">
+  <img src="icon-rounded.png" alt="Joystick app icon" width="120">
 </p>
 
 # Joystick
