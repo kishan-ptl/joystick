@@ -9,6 +9,12 @@ observes what you already do.
 
 Joystick answers that at a glance, from your menubar or a second monitor.
 
+<p align="center">
+  <img src="demo.gif" alt="Joystick mirroring four terminals — two running, two serving — as a Claude session flips to amber “needs you”" width="540">
+  <br>
+  <sub><i>Four terminals at a glance; the amber row is an agent blocked on your input.</i></sub>
+</p>
+
 ## What it shows
 
 Every terminal becomes one row, sorted by urgency, in one of five states:
