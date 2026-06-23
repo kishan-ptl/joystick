@@ -1111,6 +1111,17 @@ func tilde(_ path: String) -> String {
     return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
 }
 
+// Long worktree paths (~/fndr/oasis/.claude/worktrees/foo) swamp the metadata
+// line, so once a path runs deep we keep the first three segments (root + repo)
+// and the leaf, eliding the middle with "…". Shallow paths pass through whole.
+// Display-only — copy still uses the full op.cwd.
+func elidePath(_ path: String) -> String {
+    let t = tilde(path)
+    let parts = t.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+    guard parts.count > 5 else { return t }
+    return (parts.prefix(3) + ["…"] + parts.suffix(1)).joined(separator: "/")
+}
+
 func copyToPasteboard(_ s: String) {
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(s, forType: .string)
@@ -1135,12 +1146,14 @@ extension Color {
     static let ctxWarn = Color(hex: 0xFFC107)
     static let ctxDanger = Color(hex: 0xff5858)
 
-    // Directory path tint: warm but desaturated dusty-rose, deliberately OFF the
-    // warm STATE hues (gold 0xFFC107 = waiting / ctx-warn, terracotta claudeOrange
-    // = Claude working) so a tinted path reads as a label, never as "needs you".
-    // Mid-tone, so it carries on both the light and dark window vibrancy where a
-    // pale tint would wash out. One knob to tune the whole-app directory color.
-    static let dirTint = Color(hex: 0xC08497)
+    // Directory path tint: a desaturated cool slate, deliberately OFF every STATE
+    // hue (gold 0xFFC107 = waiting / ctx-warn, terracotta claudeOrange = Claude
+    // working, sage = serving) so a tinted path reads as a quiet reference label,
+    // never as status. Was a warm dusty-rose (0xC08497) — too saturated, it read
+    // as the loudest thing on the row; muting it to neutral slate calms the whole
+    // view and lets the gold topic + state glyphs carry the eye. Mid-tone so it
+    // still carries on the dark window vibrancy. One knob for the directory color.
+    static let dirTint = Color(hex: 0x8B93A3)
 
     // Serving (◉) is ambient infrastructure that by definition never needs you,
     // so it must be the QUIETEST state — not the loud Dracula success green
@@ -1409,7 +1422,7 @@ struct OpRow: View {
         // reads as its own thing — easy to scan for "which project" this row is —
         // without claiming a STATE color (see Color.dirTint). .foregroundColor
         // (not .foregroundStyle) so the run stays concatenable into the " · " chain.
-        parts.append(Text(tilde(op.cwd)).foregroundColor(.dirTint))
+        parts.append(Text(elidePath(op.cwd)).foregroundColor(.dirTint))
         if !op.tty.isEmpty { parts.append(Text(op.tty)) }
         if let code = op.exitCode, code != 0 {
             parts.append(Text(code == -1 ? "killed" : "exit \(code)"))
@@ -1612,13 +1625,18 @@ struct GroupRow: View {
                     }
                 }
             }
-            ForEach(group.history) { op in
+            // History is trimmed to the two most-recent earlier results — enough
+            // breadcrumb to read the row's recent arc without the full transcript
+            // that tripled each row's height. Anything older folds into a quiet
+            // "+N more" count. The full ≤3 still lives in the model if we later
+            // add hover-to-expand.
+            ForEach(group.history.prefix(2)) { op in
                 HStack(spacing: 0) {
                     Spacer().frame(width: 43)  // align under the command text
                     Text(historyLine(op))
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
-                        .opacity(0.65)
+                        .opacity(0.6)
                         .lineLimit(1)
                     Spacer(minLength: 0)
                 }
@@ -1626,6 +1644,16 @@ struct GroupRow: View {
                 // Right-clicking a specific history line copies that line's
                 // command (innermost context menu wins over the row's).
                 .contextMenu { copyMenu(for: op) }
+            }
+            if group.history.count > 2 {
+                HStack(spacing: 0) {
+                    Spacer().frame(width: 43)
+                    Text("+\(group.history.count - 2) more")
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .opacity(0.4)
+                    Spacer(minLength: 0)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1678,21 +1706,34 @@ struct GroupRow: View {
                 }
             }
         }
-        // The keyboard cursor is an accent-tinted FILL across the whole row, not
-        // a leading bar — a leading bar sat right on top of the blue unseen-
-        // result dot (both at the row's leading edge, both blue) and read as one
-        // smudged marker. Priority: selection (accent) beats "you are here"
-        // (neutral grey, the system's inactive-selection fill) beats nothing. The
-        // hue difference (blue vs grey) tells the cursor from the tab-you're-in,
-        // and grey stays quiet so neither competes with the ✋/▶/◉/✓/✗ glyphs.
-        // The accent fill fades when our window isn't key: the cursor only moves
-        // under the arrow keys while we hold focus, so a faint fill signals that
-        // a keypress would land in Ghostty, not here.
+        // The keyboard cursor: a 3px gold rail in the left margin + a faint gold
+        // wash, instead of the old heavy accent fill. The rail lives in the row's
+        // inset gutter (left of the content), so it's well clear of the blue
+        // unseen-result dot — the collision that originally forced a full fill.
+        // Gold ties the cursor to the app's identity and reads distinctly from the
+        // quiet neutral-grey "you are here" wash (no rail). Priority: selection
+        // beats focus beats nothing. Both the rail and wash fade when our window
+        // isn't key — the cursor only moves under the arrow keys while we hold
+        // focus, so a dim cursor signals a keypress would land in Ghostty, not here.
         .listRowBackground(
-            isSelected ? Color.accentColor.opacity(controlActiveState == .key ? 0.28 : 0.12)
-            : isFocused ? Color(nsColor: .unemphasizedSelectedContentBackgroundColor).opacity(0.5)
-            : Color.clear
+            ZStack(alignment: .leading) {
+                if isSelected {
+                    Color.summaryYellow.opacity(controlActiveState == .key ? 0.10 : 0.05)
+                    Rectangle().fill(Color.summaryYellow)
+                        .frame(width: 3)
+                        .opacity(controlActiveState == .key ? 1.0 : 0.4)
+                } else if isFocused {
+                    Color(nsColor: .unemphasizedSelectedContentBackgroundColor).opacity(0.35)
+                } else {
+                    Color.clear
+                }
+            }
         )
+        // Deliberate vertical rhythm: more air BETWEEN groups (so each terminal
+        // reads as its own unit) and a hairline-faint separator, instead of the
+        // default tight inset where groups blurred together.
+        .listRowInsets(EdgeInsets(top: 7, leading: 14, bottom: 7, trailing: 14))
+        .listRowSeparatorTint(Color.primary.opacity(0.07))
     }
 
     // Right-click → copy. Command first (the row's main text), then its
@@ -1839,11 +1880,13 @@ struct ContentView: View {
         .frame(minWidth: 400, minHeight: 320)
         .background {
             if keyboardNav {
-                // Frosted glass, but dialed back: a window-colored tint over the
-                // behind-window vibrancy mutes how much of the desktop bleeds
-                // through, so the blur reads as a quiet backdrop, not a feature.
+                // Frosted glass, but dialed well back: a heavier window-colored
+                // tint over the behind-window vibrancy so only a hint of the
+                // desktop bleeds through. The blur reads as a solid, settled
+                // backdrop — and crucially the near-opaque tint stops bright
+                // windows behind from showing as colored slivers at the edges.
                 VisualEffectBackground()
-                    .overlay(Color(nsColor: .windowBackgroundColor).opacity(0.55))
+                    .overlay(Color(nsColor: .windowBackgroundColor).opacity(0.72))
                     .ignoresSafeArea()
             }
         }
@@ -1926,10 +1969,18 @@ struct ContentView: View {
                 .font(.system(.caption))
                 .foregroundStyle(.secondary)
                 .help("Shell commands + Claude turns today (the day starts at 4am)")
-            Toggle("Pin", isOn: $floatOnTop)
-                .toggleStyle(.switch)
-                .controlSize(.mini)
-                .help("Keep this window above all others")
+            // Pin as a quiet icon button rather than a labelled switch — the
+            // "Pin" word + toggle track crowded the header's trailing edge; a
+            // single pin glyph (gold when on) says the same in a fraction of the
+            // width and matches the keep-it-calm chrome.
+            Button { floatOnTop.toggle() } label: {
+                Image(systemName: floatOnTop ? "pin.fill" : "pin")
+                    .font(.system(size: 12))
+                    .foregroundStyle(floatOnTop ? Color.summaryYellow : .secondary)
+            }
+            .buttonStyle(.plain)
+            .help(floatOnTop ? "Pinned above all windows — click to unpin"
+                             : "Keep this window above all others")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
