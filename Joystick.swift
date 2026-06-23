@@ -2145,24 +2145,147 @@ struct ContentView: View {
 
 // MARK: - App
 
-// Compact status shown in the menubar: an icon + count that reflects the most
-// urgent thing happening (needs-you > running > serving > idle).
+// The menubar icon is the always-on extension of the in-app waiting light, and
+// it has exactly ONE job: tell you — without a click, from peripheral vision —
+// whether something needs you. So it stays calm and unchanging while you work
+// (running/serving deliberately do NOT move it: "is my server up?" is a
+// look-at-the-window question, not an interrupt) and turns the app-icon gold
+// only when a terminal is actually waiting on you. Being the lone colored glyph
+// in a row of monochrome menubar icons IS the attention signal — no pulse needed.
 struct MenuBarLabel: View {
     @ObservedObject var store: Store
 
     var body: some View {
         let waiting = store.activeGroups.filter { $0.current.isWaiting }.count
-        let serving = store.activeGroups.filter { $0.current.isService }.count
-        let running = store.activeGroups.count - serving
         if waiting > 0 {
             Label("\(waiting)", systemImage: "hand.raised.fill")
-        } else if running > 0 {
-            Label("\(running)", systemImage: "play.fill")
-        } else if serving > 0 {
-            Label("\(serving)", systemImage: "antenna.radiowaves.left.and.right")
+                .foregroundStyle(Color.summaryYellow)   // the #DCC98F app-icon gold
         } else {
             Image(systemName: "gamecontroller")
         }
+    }
+}
+
+// The menubar dropdown, distilled to its two honest jobs:
+//   1. the ACTIONABLE "needs you" shortlist — click a row to jump straight to
+//      that Ghostty surface (the window, ⌃⌘J, stays where you triage everything;
+//      this is just the mouse path to what's urgent), and
+//   2. the app controls the keyboard-first window has nowhere to put — open it,
+//      and quit.
+// Deliberately NOT a second copy of the window's full mirror. When nothing needs
+// you it's a calm status line, not a list to manage — true to principle #1,
+// "a live mirror, never an inbox."
+struct MenuContent: View {
+    @ObservedObject var store: Store
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        let waiting = store.activeGroups.filter { $0.current.isWaiting }
+        let serving = store.activeGroups.filter { $0.current.isService }.count
+        let running = store.activeGroups.count - serving
+        let nowTs = store.now.timeIntervalSince1970
+
+        VStack(alignment: .leading, spacing: 0) {
+            if waiting.isEmpty {
+                allClear(running: running, serving: serving)
+            } else {
+                Text("Needs you")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 14)
+                    .padding(.top, 11).padding(.bottom, 3)
+                ScrollView {
+                    VStack(spacing: 2) {
+                        ForEach(waiting) { g in
+                            GroupRow(group: g, nowTs: nowTs,
+                                     focusedSurface: store.focusedSurface) {
+                                store.focus(g.current)
+                            }
+                            .padding(.horizontal, 6)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .frame(maxHeight: 280)
+            }
+            Divider()
+            controls
+        }
+        .frame(width: 320)
+        .onAppear { store.reload() }
+    }
+
+    // Calm by design: when nothing waits, the menu is a one-line status, not a
+    // list. The ambient running/serving counts answer "is stuff still alive?" as
+    // quiet text — the live mirror of all of it is the window's job, not this.
+    private func allClear(running: Int, serving: Int) -> some View {
+        var parts: [String] = []
+        if running > 0 { parts.append("\(running) running") }
+        if serving > 0 { parts.append("\(serving) serving") }
+        return HStack(spacing: 9) {
+            Image(systemName: "gamecontroller")
+                .font(.system(size: 15))
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(parts.isEmpty ? "Idle" : "Nothing needs you")
+                    .font(.system(.subheadline).weight(.semibold))
+                if !parts.isEmpty {
+                    Text(parts.joined(separator: " · "))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+    }
+
+    private var controls: some View {
+        VStack(spacing: 0) {
+            MenuRow(title: "Open Joystick", shortcut: "⌃⌘J", systemImage: "macwindow") {
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: "main")
+            }
+            MenuRow(title: "Quit Joystick", shortcut: "⌘Q", systemImage: "power") {
+                NSApp.terminate(nil)
+            }
+        }
+        .padding(.vertical, 5)
+    }
+}
+
+// A menubar-style row button: full-width, left-aligned label + trailing shortcut
+// hint, with a soft hover fill — the chrome the `.window`-style MenuBarExtra
+// doesn't give us for free (it's a plain SwiftUI surface, not an NSMenu).
+struct MenuRow: View {
+    let title: String
+    var shortcut: String? = nil
+    let systemImage: String
+    let action: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 9) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 12)).frame(width: 16)
+                    .foregroundStyle(.secondary)
+                Text(title).font(.system(.subheadline))
+                Spacer()
+                if let shortcut {
+                    Text(shortcut).font(.system(.caption))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .background(hover ? Color.primary.opacity(0.08) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 5))
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .padding(.horizontal, 8)
     }
 }
 
@@ -2338,10 +2461,12 @@ struct JoystickApp: App {
         .defaultSize(width: 400, height: 686)
 
         // The app now owns the menubar itself (replacing the SwiftBar plugin).
+        // The dropdown is its own distilled view (MenuContent), NOT a shrunk copy
+        // of the window — the icon answers "should I look?", the dropdown "at what,
+        // and let me act or quit"; the window (⌃⌘J) stays the full mirror.
         MenuBarExtra {
-            ContentView()
+            MenuContent(store: store)
                 .environmentObject(store)
-                .frame(width: 380, height: 460)
         } label: {
             MenuBarLabel(store: store)
         }
