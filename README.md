@@ -1,4 +1,8 @@
-# 🕹 Joystick
+<p align="center">
+  <img src="icon.png" alt="Joystick app icon" width="120">
+</p>
+
+# Joystick
 
 **Mission control for your terminal.** A macOS dashboard that mirrors what every
 Ghostty tab is doing — shell commands, Claude Code sessions, dev servers — and
