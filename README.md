@@ -5,10 +5,6 @@ Ghostty tab is doing — shell commands, Claude Code sessions, dev servers — a
 gets you back to the right tab in one click. Zero workflow change: it just
 observes what you already do.
 
-> You have 12 tabs open and 5 Claude sessions running. Which one needs you?
-
-Joystick answers that at a glance, from your menubar or a second monitor.
-
 <p align="center">
   <img src="demo.gif" alt="Joystick mirroring four terminals — two running, two serving — as a Claude session flips to amber “needs you”" width="540">
   <br>
