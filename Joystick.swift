@@ -22,6 +22,21 @@ enum SetupResult: Equatable { case ok, failed(String) }
 // means the user said no (or it's off in Privacy settings) — we surface a banner.
 enum AutomationStatus { case granted, denied, notDetermined, unknown }
 
+// A prompt parked against a terminal — your next instruction for that Claude
+// session/shell, staged so a side-thought doesn't derail what it's doing now.
+// Pure value type, Codable for UserDefaults persistence (like seenAt/slotOrder);
+// the event log never sees it — that stays a mirror of what happened, not intent.
+struct QueuedPrompt: Identifiable, Codable, Equatable {
+    let id: String
+    var text: String
+    let createdAt: Double
+    init(text: String) {
+        id = UUID().uuidString
+        self.text = text
+        createdAt = Date().timeIntervalSince1970
+    }
+}
+
 // MARK: - Store
 
 @MainActor
@@ -62,6 +77,22 @@ final class Store: ObservableObject {
     // highlight follows the row you meant instead of the slot it used to be in.
     @Published var filterText = ""
     @Published var selectedKey: String? = nil
+
+    // Per-terminal prompt queue (window only). queues maps a group key (the same
+    // claude-<sid> / surface key rows group by) to the prompts you've parked for
+    // that session — your next instructions, staged so you don't derail what it's
+    // doing now. App-owned state, persisted to UserDefaults like seenAt/slotOrder;
+    // deliberately NOT in the event log (the log stays a pure mirror of what
+    // HAPPENED, never a record of what you intend). The compose bar (composing,
+    // below) edits these; they render inline under each row.
+    @Published var queues: [String: [QueuedPrompt]] = [:]
+    // composing = the compose bar is open; it targets the currently selectedKey
+    // row, so arrows keep navigating (and just re-aim the bar) instead of trapping
+    // you. composeDraft is the prompt being typed. Both window-only; the bar
+    // reuses the always-focused-field pattern (like filterText), so capture is
+    // robust where the anchored popover was janky.
+    @Published var composing = false
+    @Published var composeDraft = ""
 
     static let minRunningSecs = 5.0
     static let minDoneSecs = 10.0
@@ -136,6 +167,11 @@ final class Store: ObservableObject {
         // Restore the user's manual row order; reload() then drops gone keys and
         // appends any new ones, so a saved order survives across launches.
         slotOrder = UserDefaults.standard.stringArray(forKey: "slotOrder") ?? []
+        // Restore parked prompts (JSON-encoded [groupKey: [QueuedPrompt]]).
+        if let data = UserDefaults.standard.data(forKey: "queues"),
+           let q = try? JSONDecoder().decode([String: [QueuedPrompt]].self, from: data) {
+            queues = q
+        }
         commandsToday = UserDefaults.standard.integer(forKey: "commandsToday")
         tallyDayStart = UserDefaults.standard.double(forKey: "tallyDayStart")
         refreshWiring()
@@ -185,7 +221,7 @@ final class Store: ObservableObject {
         // The same set install.sh places in $JOYSTICK_HOME (incl. the installer,
         // so `install.sh uninstall` and re-runs use the current copy).
         let res = URL(fileURLWithPath: resPath)
-        for s in ["install.sh", "joystick.zsh", "claude-hook.sh", "joystick-redact.zsh", "joystick-focus.sh"] {
+        for s in ["install.sh", "joystick.zsh", "claude-hook.sh", "joystick-redact.zsh", "joystick-focus.sh", "joystick-send.sh"] {
             let src = res.appendingPathComponent(s)
             guard fm.fileExists(atPath: src.path) else { continue }
             let dst = home.appendingPathComponent(s)
@@ -641,6 +677,77 @@ final class Store: ObservableObject {
         reload()
     }
 
+    // MARK: - Prompt queue
+
+    // The prompts parked for a terminal, oldest first (FIFO — the next thing you
+    // meant to say is the one you queued first).
+    func queue(for key: String) -> [QueuedPrompt] { queues[key] ?? [] }
+
+    // Park a prompt against a terminal. Blank/whitespace-only is dropped (an empty
+    // queue item is just clutter). New prompts go to the back of the line.
+    func enqueue(_ key: String, _ text: String) {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return }
+        queues[key, default: []].append(QueuedPrompt(text: t))
+        persistQueues()
+    }
+
+    func removeQueued(_ key: String, _ id: String) {
+        queues[key]?.removeAll { $0.id == id }
+        if queues[key]?.isEmpty == true { queues.removeValue(forKey: key) }  // no empty arrays linger
+        persistQueues()
+    }
+
+    // Copy: clipboard only — the prompt STAYS queued (you might be pasting it
+    // somewhere else, and copy shouldn't quietly dispatch it).
+    func copyQueued(_ p: QueuedPrompt) { copyToPasteboard(p.text) }
+
+    // Send → tab: focus that exact Ghostty surface and paste the prompt in via
+    // joystick-send.sh (bracketed paste, NEVER auto-submitted — you press Enter),
+    // then drop it from the queue (it's been dispatched). With no surface/cwd to
+    // aim at (e.g. an external row) we can't target a tab, so fall back to a plain
+    // clipboard copy and leave it queued. Mirrors focus(): fire-and-forget Process.
+    func sendQueued(_ key: String, _ p: QueuedPrompt, to op: Op) {
+        guard !op.surface.isEmpty || !op.cwd.isEmpty else { copyToPasteboard(p.text); return }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        proc.arguments = [Self.sendScript, op.surface.isEmpty ? "-" : op.surface, op.cwd, p.text]
+        try? proc.run()
+        removeQueued(key, p.id)
+    }
+
+    // Open the compose bar aimed at a row, and put the cursor on it (chip / menu /
+    // ⌘K all route here). The bar then follows the selection as you arrow.
+    func startCompose(for key: String) {
+        selectedKey = key
+        composing = true
+    }
+
+    // ⌘K — toggle the compose bar for the row under the cursor.
+    func openQueueForSelection() {
+        if composing { endCompose() }
+        else if selectedKey != nil { composing = true }
+    }
+
+    // ⏎ in the compose bar — park the prompt against the SELECTED row and stay
+    // open for the next thought.
+    func commitCompose() {
+        guard let key = selectedKey else { return }
+        enqueue(key, composeDraft)
+        composeDraft = ""
+    }
+
+    // esc / done — leave compose mode.
+    func endCompose() {
+        composing = false
+        composeDraft = ""
+    }
+
+    // The group a key belongs to (for the compose bar's "Queue for X" label).
+    func group(forKey key: String) -> SurfaceGroup? {
+        orderedGroups.first { $0.key == key }
+    }
+
     // MARK: - Keyboard navigation
 
     // Does this group match the current type-to-filter query? (Empty query = all.)
@@ -766,6 +873,18 @@ final class Store: ObservableObject {
             Bundle.main.resourcePath.map { $0 + "/joystick-focus.sh" },
             (home as NSString).expandingTildeInPath + "/joystick-focus.sh",
             NSString(string: "~/joystick/joystick-focus.sh").expandingTildeInPath,
+        ].compactMap { $0 }
+        return candidates.first { FileManager.default.fileExists(atPath: $0) } ?? candidates.last!
+    }()
+
+    // joystick-send.sh (the "paste a queued prompt into the tab" script) lives in
+    // the same places as joystick-focus.sh — same lookup, first existing wins.
+    static let sendScript: String = {
+        let home = ProcessInfo.processInfo.environment["JOYSTICK_HOME"] ?? "~/.config/joystick"
+        let candidates = [
+            Bundle.main.resourcePath.map { $0 + "/joystick-send.sh" },
+            (home as NSString).expandingTildeInPath + "/joystick-send.sh",
+            NSString(string: "~/joystick/joystick-send.sh").expandingTildeInPath,
         ].compactMap { $0 }
         return candidates.first { FileManager.default.fileExists(atPath: $0) } ?? candidates.last!
     }()
@@ -1068,6 +1187,11 @@ final class Store: ObservableObject {
         UserDefaults.standard.set(slotOrder, forKey: "slotOrder")
     }
 
+    private func persistQueues() {
+        guard let data = try? JSONEncoder().encode(queues) else { return }
+        UserDefaults.standard.set(data, forKey: "queues")
+    }
+
     nonisolated static func fetchLiveSurfaceIds() -> Set<String>? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
@@ -1323,6 +1447,7 @@ struct OpRow: View {
     let nowTs: Double
     var jumpNumber: Int? = nil      // ⌘N jump hint (window nav only); nil = none
     var showJumpSlot = false        // reserve the trailing slot so the time column stays aligned
+    var queueEnabled = false        // window rows only — reserve trailing room for the queue chip
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -1362,6 +1487,10 @@ struct OpRow: View {
             // command's trailing edge). The shortcut still works via the key monitor,
             // and the hint footer still documents it. jumpNumber/showJumpSlot are left
             // wired up so restoring the keycap is a one-line change.
+            // Reserve room at the trailing edge for the queue chip, which GroupRow
+            // overlays at the top-right (above its first-mouse catcher) so a click
+            // there opens the composer instead of jumping to the tab.
+            if queueEnabled { Color.clear.frame(width: 34, height: 1) }
         }
         .padding(.vertical, 3)
     }
@@ -1505,6 +1634,12 @@ struct GroupRow: View {
     var clearRow: (Op) -> Void = { _ in }
     var canReorder: Bool = false   // window nav, >1 row — gates "Move up/down"
     var moveRow: (Int) -> Void = { _ in }   // -1 = up, +1 = down
+    // Prompt queue (window only). store drives capture/dispatch; queue is the
+    // parked prompts shown inline under the row. The menubar leaves these
+    // nil/false/empty so it stays a calm needs-you glance.
+    var store: Store? = nil
+    var queueEnabled: Bool = false
+    var queue: [QueuedPrompt] = []
     let action: () -> Void
 
     // .key only when OUR window is the key window. The selection fill means
@@ -1568,7 +1703,8 @@ struct GroupRow: View {
                 }
             }
             OpRow(op: group.current, nowTs: nowTs,
-                  jumpNumber: jumpNumber, showJumpSlot: keyboardNav)
+                  jumpNumber: jumpNumber, showJumpSlot: keyboardNav,
+                  queueEnabled: queueEnabled)
             // Live subagent fan-out: list each Task beneath the row (the main line
             // shows the count/chip). Shown for a running fan-out (2+ at once) OR for a
             // subagent still running after the turn was marked done (the ⟳ bg case) —
@@ -1625,6 +1761,42 @@ struct GroupRow: View {
                     }
                 }
             }
+            // Upcoming: the prompts you've parked for this terminal, shown right
+            // under what it's doing now (above past history — your next moves, not
+            // its last ones). Always visible, so the queue is never hidden. Each is
+            // 1-tap: Send → tab (focus + paste, you press Enter), Copy, or remove.
+            // The ⤷ + soft gold set them apart from the grey ✓/✗ history below.
+            if queueEnabled, let store {
+                ForEach(queue.prefix(3)) { p in
+                    HStack(spacing: 6) {
+                        Spacer().frame(width: 43)   // align under the command text
+                        Text("⤷ \(p.text)")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(Color.summaryYellow)
+                            .lineLimit(2)
+                        Spacer(minLength: 6)
+                        queueLineButton("paperplane.fill", "Send → tab: focus this terminal and paste it in. You press Enter.", color: .accentColor) {
+                            store.sendQueued(group.key, p, to: group.current)
+                        }
+                        queueLineButton("doc.on.doc", "Copy to clipboard (stays queued)") {
+                            store.copyQueued(p)
+                        }
+                        queueLineButton("xmark", "Remove from queue") {
+                            store.removeQueued(group.key, p.id)
+                        }
+                    }
+                }
+                if queue.count > 3 {
+                    HStack(spacing: 0) {
+                        Spacer().frame(width: 43)
+                        Text("+\(queue.count - 3) more queued")
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(Color.summaryYellow)
+                            .opacity(0.7)
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
             // History is trimmed to the two most-recent earlier results — enough
             // breadcrumb to read the row's recent arc without the full transcript
             // that tripled each row's height. Anything older folds into a quiet
@@ -1662,9 +1834,28 @@ struct GroupRow: View {
         // Let the click land on the FIRST press even when Joystick is in the
         // background (see FirstMouseView). Transparent while we're frontmost.
         .overlay { FirstMouseView(action: action) }
+        // The queue chip sits ABOVE that catcher (added after), with its OWN
+        // first-mouse handling — so clicking it opens the composer instead of
+        // jumping to the tab, whether or not Joystick is focused.
+        .overlay(alignment: .topTrailing) {
+            if queueEnabled, store != nil { queueChipView }
+        }
         .help("Click to focus this tab in Ghostty · right-click to copy")
         .contextMenu {
             copyMenu(for: group.current)
+            // Prompt queue entry points (the chip is small): start a prompt, or
+            // fire the next one straight to the tab. Window rows only.
+            if queueEnabled, let store {
+                Divider()
+                Button { store.startCompose(for: group.key) } label: {
+                    Label("Queue a prompt…", systemImage: "tray.and.arrow.down")
+                }
+                if let next = queue.first {
+                    Button { store.sendQueued(group.key, next, to: group.current) } label: {
+                        Label("Send next → tab", systemImage: "paperplane")
+                    }
+                }
+            }
             // A serving row holds one+ listening ports (parsed from lsof). Offer to
             // open each as http://localhost:<port>. Deliberately one explicit click
             // per port, NOT the row's primary click (that focuses the tab) and NOT
@@ -1734,6 +1925,54 @@ struct GroupRow: View {
         // default tight inset where groups blurred together.
         .listRowInsets(EdgeInsets(top: 7, leading: 14, bottom: 7, trailing: 14))
         .listRowSeparatorTint(Color.primary.opacity(0.07))
+    }
+
+    // The on-deck chip at the row's top-right: a parked-prompt count, else a faint
+    // + to start one. Neutral-tinted (never a state hue) — it's your staging area,
+    // not something the board is flagging. onTapGesture opens the composer when
+    // we're frontmost; the FirstMouseView overlay does the same on a background
+    // click — and because this whole chip is layered above the row's own catcher,
+    // that click never falls through to "focus the tab."
+    @ViewBuilder
+    private var queueChipView: some View {
+        let count = queue.count
+        HStack(spacing: 3) {
+            if count > 0 {
+                Image(systemName: "tray.full")
+                Text("\(count)")
+            } else {
+                Image(systemName: "plus")
+            }
+        }
+        .font(.system(size: 10, weight: .medium))
+        .foregroundStyle(count > 0 ? Color.dirTint : Color.secondary.opacity(0.65))
+        .padding(.horizontal, count > 0 ? 5 : 4)
+        .padding(.vertical, 2)
+        .background(Color.primary.opacity(count > 0 ? 0.06 : 0), in: Capsule())
+        .contentShape(Rectangle())
+        .onTapGesture { store?.startCompose(for: group.key) }
+        .overlay { FirstMouseView { store?.startCompose(for: group.key) } }
+        .padding(.trailing, 2)
+        .padding(.top, 1)
+        .help(count > 0
+              ? "\(count) prompt\(count == 1 ? "" : "s") queued — click to add (⌘K)"
+              : "Queue a prompt for this terminal (⌘K)")
+    }
+
+    // A small icon button for an inline queued-prompt line (send / copy / remove).
+    // Real Button, so its tap fires the action rather than the row's focus gesture.
+    private func queueLineButton(_ icon: String, _ help: String,
+                                 color: Color = .secondary,
+                                 _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 11))
+                .foregroundStyle(color)
+                .frame(width: 18, height: 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 
     // Right-click → copy. Command first (the row's main text), then its
@@ -1849,6 +2088,7 @@ struct ContentView: View {
     @Environment(\.openWindow) private var openWindow
     @State private var floatOnTop = false
     @FocusState private var searchFocused: Bool
+    @FocusState private var composeFocused: Bool
     @State private var keyMonitor: Any?
 
     // The windowed instance turns on keyboard-first navigation (filter field,
@@ -1862,7 +2102,8 @@ struct ContentView: View {
             header
             Divider()
             if keyboardNav {
-                searchField
+                // While queueing, the filter swaps to a compose field for the row.
+                if store.composing { composeBar } else { searchField }
                 Divider()
             }
             if store.showSetupBanner {
@@ -1914,6 +2155,13 @@ struct ContentView: View {
         .onChange(of: store.filterText) { _, _ in
             if keyboardNav { store.ensureSelection() }
         }
+        // When compose closes, hand focus back to the filter. Opening is handled
+        // in composeBar's onAppear — the field has to exist before it can take
+        // focus, so setting it the instant `composing` flips wouldn't stick.
+        .onChange(of: store.composing) { _, on in
+            guard keyboardNav, !on else { return }
+            DispatchQueue.main.async { searchFocused = true }
+        }
         // Hotkey summon: clear any stale filter and pre-select the top "needs
         // you" row, then grab the field so you can type-to-filter immediately.
         .onReceive(NotificationCenter.default.publisher(for: Summoner.didSummon)) { _ in
@@ -1940,8 +2188,41 @@ struct ContentView: View {
         .padding(.vertical, 7)
     }
 
+    // The compose bar replaces the filter while you're queueing (opened by ⌘K /
+    // the row's ＋ chip / right-click). Same always-focused-field mechanism as the
+    // filter, so capture is reliable where the popover wasn't: ⏎ parks the prompt
+    // and stays open for the next thought, esc closes — both handled by the key
+    // monitor, which falls through to this field for the actual typing.
+    private var composeBar: some View {
+        let name = String((store.selectedKey
+            .flatMap { store.group(forKey: $0) }
+            .map { g in !g.current.sessionName.isEmpty ? g.current.sessionName
+                      : !g.current.title.isEmpty ? g.current.title : g.current.cmd }
+            ?? "this terminal").prefix(36))
+        return HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "tray.and.arrow.down")
+                .font(.caption).foregroundStyle(Color.summaryYellow)
+                .padding(.top, 2)
+            // Multi-line + growable: ⏎ makes a newline (handled by the field),
+            // ⌘⏎ parks it (the key monitor). No onSubmit, so a plain ⏎ never commits.
+            TextField("Queue a prompt for \(name)…", text: $store.composeDraft, axis: .vertical)
+                .textFieldStyle(.plain)
+                .lineLimit(1...6)
+                .focused($composeFocused)
+            Text("⌘⏎ add · esc done")
+                .font(.caption2).foregroundStyle(.tertiary)
+                .padding(.top, 2)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        // Focus the field as soon as the bar appears (⌘K / ＋ / menu open it), so
+        // you can type immediately. async because focus only takes once the field
+        // is laid out in the hierarchy, a tick after this view is inserted.
+        .onAppear { DispatchQueue.main.async { composeFocused = true } }
+    }
+
     private var hintFooter: some View {
-        Text("↑↓ move · ⌘↑↓ reorder · ⏎ focus · ⌘1–9 jump · esc close")
+        Text("↑↓ move · ⏎ focus · ⌘K queue · ⌘↑↓ reorder · ⌘1–9 jump · esc close")
             .font(.system(.caption2))
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2053,7 +2334,12 @@ struct ContentView: View {
                  markUnread: { store.markUnread($0) },
                  clearRow: { store.clearRow($0) },
                  canReorder: keyboardNav && store.visibleGroups.count > 1,
-                 moveRow: { store.moveRow(g.key, $0) }) {
+                 moveRow: { store.moveRow(g.key, $0) },
+                 store: store,
+                 // Queue is a window thing; external rows (CI/webhooks) have no tab
+                 // to paste into, so no chip there.
+                 queueEnabled: keyboardNav && !g.current.isExternal,
+                 queue: store.queue(for: g.key)) {
             store.selectedKey = g.key   // a mouse click also moves the cursor
             store.focus(g.current)
         }
@@ -2075,6 +2361,20 @@ struct ContentView: View {
                 // Only steer the list while OUR window is key — the menubar
                 // popover and any sheets keep their own key handling.
                 guard let w = event.window, w.title == "Joystick", w.canBecomeMain else { return false }
+                // Compose mode (the queue bar is up): ⏎ parks the prompt (stays open
+                // for the next), esc closes. ↑/↓ FALL THROUGH to the nav switch
+                // below so you're never trapped — they move the selection and the
+                // bar re-aims at the new row. Letters fall through to the field.
+                if store.composing {
+                    let cmd = event.modifierFlags.contains(.command)
+                    switch Int(event.keyCode) {
+                    case 36, 76:
+                        if cmd { store.commitCompose(); return true }  // ⌘⏎ parks it
+                        return false                                   // plain ⏎ → newline in the field
+                    case 53: store.endCompose(); return true           // esc closes
+                    default: break                                     // ↑/↓ + letters fall through
+                    }
+                }
                 let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
                 switch Int(event.keyCode) {
                 // ⌘ test is `.contains`, NOT `== .command`: macOS reports arrow
@@ -2099,6 +2399,10 @@ struct ContentView: View {
                 if flags == .control, let ch = event.charactersIgnoringModifiers {
                     if ch == "n" { store.moveSelection(1); return true }    // emacs-y
                     if ch == "p" { store.moveSelection(-1); return true }
+                }
+                if flags == .command, let ch = event.charactersIgnoringModifiers, ch == "k" {
+                    store.openQueueForSelection()   // ⌘K — queue a prompt for the selected row
+                    return true
                 }
                 if flags == .command, let ch = event.charactersIgnoringModifiers,
                    let n = Int(ch), (1...9).contains(n) {

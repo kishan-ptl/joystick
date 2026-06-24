@@ -527,6 +527,22 @@ annoyances are the real v0.2.
   narrow Claude "queue next message" composer and degrade everything structured
   (permission prompts, shell input, passwords) to "⏎ jumps to the tab." Don't
   chase those — that's how it becomes a bad terminal emulator.
+  - **Reopened & built as the prompt queue (2026-06-24)** — exactly the narrow
+    "queue your next instruction" case this entry carved out, and built to its
+    guardrails. Per-row queue: park a side-thought against a terminal (⌘K / chip /
+    right-click → composer) while it works, then dispatch on YOUR tap — **Send →
+    tab** (focus + `perform action "paste_from_clipboard"`, validated `true` on
+    Ghostty 1.3.1, Automation-only) or **Copy**. Mirror-not-actor is preserved by
+    the two choices we made deliberately: paste **never auto-submits** (bracketed
+    paste; you press Enter), and there is **no autonomous advancing** (a finished
+    session does NOT auto-paste its next prompt — the queue only ever moves on a
+    tap). Capture is the real value (don't lose the thought, don't derail the
+    turn); dispatch stays a deliberate human act, so the can't-hurt-you safety
+    holds. State is app-owned (UserDefaults `queues`, like `seenAt`/`slotOrder`) —
+    the event log is untouched, so the log-as-pure-mirror contract is intact.
+    Window-only; the menubar stays a calm needs-you glance. `text:` was rejected
+    for send in favor of `paste_from_clipboard` precisely because raw `text:`
+    submits on a newline — bracketed paste is what keeps multi-line prompts safe.
 
 ## Annoyances (add as encountered)
 
@@ -581,6 +597,17 @@ annoyances are the real v0.2.
   marker and strand it as a permanent phantom. Cheap (runs at session boundaries,
   not per-turn; self-limiting) but deferred — it's a pre-existing hook-wide leak,
   not a bg-shell problem, so it deserves its own scoped change. (2026-06-16)
+- Prompt queue (2026-06-24) is keyed by **group key** (claude-<sid> / surface),
+  so a Claude session that rotates its sid mid-life — `/clear`, `/compact`,
+  `/resume` — orphans whatever was queued against the old sid. Acceptable for v1
+  (the common case is a stable session; shell rows key by the very-stable surface
+  id and don't have this), but the truer key for Claude would survive the rotation
+  (map sid→surface and re-home the queue, the way `retireSuperseded` tracks it).
+- Prompt queue has **no GC of orphaned queues**: a queue whose terminal is long
+  gone lingers in UserDefaults (it's just unreachable — no row, no chip). The data
+  is tiny (text), so left for now rather than ship a hacky absence-timer that could
+  drop a queue during a transient row blip. Real fix: prune a queue once its key
+  has been absent from the fold for a solid grace window (not a single reload).
 
 ## Resolved in 2026-06-12 architecture review
 - Log re-parsed every 1s tick on main thread → now gated on (mtime, size)

@@ -26,9 +26,11 @@ JOYSTICK_HOME=${JOYSTICK_HOME:-$HOME/.config/joystick}
 ZSHRC=${JOYSTICK_ZSHRC:-${ZDOTDIR:-$HOME}/.zshrc}
 CLAUDE_SETTINGS=${JOYSTICK_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}
 
-# The scripts that get installed. WIRED = referenced by .zshrc / Claude;
-# ALL also includes this installer so `uninstall` lives next to them.
-WIRED=(joystick.zsh claude-hook.sh joystick-redact.zsh joystick-focus.sh)
+# The scripts that get installed. WIRED = the emitters/helpers placed in
+# $JOYSTICK_HOME (the zsh + Claude hooks reference some; the app invokes
+# joystick-focus.sh / joystick-send.sh). ALL also includes this installer so
+# `uninstall` lives next to them.
+WIRED=(joystick.zsh claude-hook.sh joystick-redact.zsh joystick-focus.sh joystick-send.sh)
 ALL=($WIRED install.sh)
 
 MARK_BEGIN='# >>> joystick >>>'

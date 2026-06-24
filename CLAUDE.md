@@ -36,6 +36,19 @@ shared state and doubles as the future integration API.
   recoverable from git history if ever needed.)
 - **Interaction** — `joystick-focus.sh` (AppleScript): click a row → focus that
   exact Ghostty surface (by id; cwd fallback; reopen if the tab is gone).
+  `joystick-send.sh` (AppleScript): the prompt queue's "apply to tab" — focus the
+  surface, then paste a queued prompt in via Ghostty's `perform action
+  "paste_from_clipboard"` (bracketed paste, so multi-line never auto-submits;
+  Automation perms only, no Accessibility). Never reopens a gone surface.
+- **Prompt queue** — per-terminal, app-owned state: `Store.queues`
+  (`[groupKey: [QueuedPrompt]]`), persisted to UserDefaults like
+  `seenAt`/`slotOrder`, deliberately NOT in the event log (the log stays a pure
+  mirror of what happened, never a record of intent). Park a prompt against a row
+  (⌘K / the on-deck chip / right-click → composer) without switching tabs;
+  dispatch on a tap — Send → tab pastes but never presses Enter, Copy just copies.
+  No autonomous advancing: a finished session never auto-sends. Window-only; the
+  menubar stays a calm needs-you glance. See NOTES.md "Reopened & built as the
+  prompt queue (2026-06-24)".
 
 `joystick-redact.zsh` (shared sanitizer) and `joystick-scrub.sh` (retroactive
 log cleanup) support the emitters.
