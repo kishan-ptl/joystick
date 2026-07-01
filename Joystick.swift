@@ -2137,8 +2137,10 @@ struct ContentView: View {
             store.reload()
             // Apply the default pin state — onChange only fires on a *change*,
             // so without this the toggle and the actual window level could drift
-            // apart until the first manual toggle.
-            for w in NSApp.windows { w.level = floatOnTop ? .floating : .normal }
+            // apart until the first manual toggle. Scoped to the main window on
+            // purpose: sweeping every NSApp.window would also drag down the
+            // menubar dropdown panel's level and hide it behind other windows.
+            mainWindow?.level = floatOnTop ? .floating : .normal
             if keyboardNav {
                 Summoner.shared.reopen = { openWindow(id: "main") }
                 installKeyMonitor()
@@ -2150,7 +2152,7 @@ struct ContentView: View {
         }
         .onDisappear { if keyboardNav { removeKeyMonitor() } }
         .onChange(of: floatOnTop) { _, pinned in
-            for w in NSApp.windows { w.level = pinned ? .floating : .normal }
+            mainWindow?.level = pinned ? .floating : .normal
         }
         .onChange(of: store.filterText) { _, _ in
             if keyboardNav { store.ensureSelection() }
@@ -2424,8 +2426,14 @@ struct ContentView: View {
     // explicitly with an AppKit frame autosave. On first run (nothing saved yet)
     // seed the frame we settled on: 400×686, anchored to the top-right of the
     // screen — the menubar-companion shape, out of the way of editor windows.
+    // Our one summonable window, looked up by title + canBecomeMain so the
+    // menubar dropdown panel (also an NSApp.window) never matches.
+    private var mainWindow: NSWindow? {
+        NSApp.windows.first { $0.title == "Joystick" && $0.canBecomeMain }
+    }
+
     private func persistWindowFrame() {
-        guard let w = NSApp.windows.first(where: { $0.title == "Joystick" && $0.canBecomeMain }) else { return }
+        guard let w = mainWindow else { return }
         let name = NSWindow.FrameAutosaveName("JoystickMain")
         if !w.setFrameUsingName(name), let vf = (w.screen ?? NSScreen.main)?.visibleFrame {
             let size = NSSize(width: 400, height: min(686, vf.height))
@@ -2441,7 +2449,7 @@ struct ContentView: View {
     // behind it. titleVisibility is left alone so w.title stays "Joystick" and
     // Summoner's window lookup still resolves.
     private func styleMainWindow() {
-        guard let w = NSApp.windows.first(where: { $0.title == "Joystick" && $0.canBecomeMain }) else { return }
+        guard let w = mainWindow else { return }
         w.isOpaque = false
         w.backgroundColor = .clear
     }
@@ -2479,6 +2487,27 @@ struct MenuBarLabel: View {
 // Deliberately NOT a second copy of the window's full mirror. When nothing needs
 // you it's a calm status line, not a list to manage — true to principle #1,
 // "a live mirror, never an inbox."
+// MenuBarExtra(.window) drops its dropdown panel at a plain window level, so any
+// higher-level window — our own pinned "float on top" window, or another app's
+// floating window — sits over it and the menu reads as "below everything." A
+// real menu is always topmost, so grab the hosting panel the moment the content
+// mounts and lift it to .popUpMenu (the level system menus use), ordered front.
+private struct MenuWindowRaiser: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async { raise(v.window) }
+        return v
+    }
+    func updateNSView(_ v: NSView, context: Context) {
+        DispatchQueue.main.async { raise(v.window) }
+    }
+    private func raise(_ window: NSWindow?) {
+        guard let window else { return }
+        window.level = .popUpMenu
+        window.orderFront(nil)
+    }
+}
+
 struct MenuContent: View {
     @ObservedObject var store: Store
     @Environment(\.openWindow) private var openWindow
@@ -2516,6 +2545,7 @@ struct MenuContent: View {
             controls
         }
         .frame(width: 320)
+        .background(MenuWindowRaiser())
         .onAppear { store.reload() }
     }
 
