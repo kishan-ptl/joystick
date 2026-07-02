@@ -39,7 +39,10 @@ for i in {1..30}; do   # recent, all closed → these are what the tail keeps
   print -r -- "{\"v\":1,\"ev\":\"end\",\"id\":\"f$i\",\"exit\":0,\"dur\":0,\"ts\":$((101 + i))}"                     >> "$LOG"
 done
 
-JOYSTICK_ROTATE_KEEP=10 _joystick_rotate_log
+# ARCHIVE_DAYS is huge because the crafted ts values are tiny (1..131 ≈ 1970):
+# a realistic 90-day window would age out every archived line the instant it
+# lands, and the archive assertions below need them to survive this rotation.
+JOYSTICK_ROTATE_KEEP=10 JOYSTICK_ARCHIVE_DAYS=9999999 _joystick_rotate_log
 
 # Open ops survive even though they're the oldest lines in the file.
 want    grep -q '"id":"svc-OPEN"'  "$LOG"
@@ -53,6 +56,25 @@ eq "$(wc -l < "$LOG" | tr -d ' ')" 12 "line count is keep + open-starts"
 eq "$(head -1 "$LOG" | grep -o 'svc-OPEN')" "svc-OPEN" "open start is first line"
 # Rotated file is locked back down to 600 (principle #6), not left at the umask.
 eq "$(stat -f '%Lp' "$LOG")" "600" "rotated log is chmod 600"
+
+# The dropped head landed in the archive sidecar — closed history is preserved
+# there, while the open starts (still in the live log) are NOT duplicated in.
+ARCH=${LOG:h}/events-archive.jsonl
+want    grep -q '"id":"old-CLOSED"' "$ARCH"
+want    grep -q '» one'             "$ARCH"     # the closed 1st claude turn
+wantnot grep -q '"id":"svc-OPEN"'   "$ARCH"     # preserved live → no double-count
+wantnot grep -q '» two'             "$ARCH"
+# head(56) minus the 2 preserved open starts = 54 archived lines.
+eq "$(wc -l < "$ARCH" | tr -d ' ')" 54 "archive = dropped head minus open starts"
+eq "$(stat -f '%Lp' "$ARCH")" "600" "archive is chmod 600"
+
+# Retention: a rotation with a 0-day window ages out every old line (their ts
+# is ~1970) while a fresh line survives. Stamped slightly in the future so the
+# clock ticking between this write and the rotation can't push it past cutoff.
+print -r -- "{\"v\":1,\"kind\":\"shell\",\"ev\":\"start\",\"id\":\"fresh\",\"cmd\":\"echo hi\",\"ts\":$((EPOCHSECONDS + 100))}" >> "$ARCH"
+JOYSTICK_ROTATE_KEEP=10 JOYSTICK_ARCHIVE_DAYS=0 _joystick_rotate_log
+want grep -q '"id":"fresh"' "$ARCH"
+eq "$(wc -l < "$ARCH" | tr -d ' ')" 1 "0-day retention prunes all but the fresh line"
 
 print -r -- "pass=$pass fail=$fail"
 (( fail == 0 ))

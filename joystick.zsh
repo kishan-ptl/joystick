@@ -37,10 +37,19 @@ unset _joystick_dir
 # test only; production is always 2000. Re-chmod after the mv: the rotated file
 # lands with the umask, not 600, and principle #6 wants the plaintext locked down
 # now, not only at the next shell startup.
+#
+# The dropped head is NOT discarded: it appends to events-archive.jsonl (same
+# directory — so it inherits the chmod 600 + Time-Machine exclusion — same
+# schema), which is what lets the app's day digest still show a whole day whose
+# morning rotated out mid-afternoon. Preserved open starts stay in the live log
+# ONLY — archiving them too would double-count the op when both files are read
+# together. The archive is aged out past JOYSTICK_ARCHIVE_DAYS (90) at each
+# rotation, so it stays a bounded recent window, never a forever log.
 _joystick_rotate_log() {
   local log=$JOYSTICK_LOG keep=${JOYSTICK_ROTATE_KEEP:-2000}
+  local arch=${JOYSTICK_LOG:h}/events-archive.jsonl days=${JOYSTICK_ARCHIVE_DAYS:-90}
   [[ -f $log ]] || return 0
-  awk -v keep="$keep" '
+  awk -v keep="$keep" -v arch="$log.arch.tmp" '
     function val(s, key) {
       if (match(s, "\"" key "\":\"")) { s = substr(s, RSTART + RLENGTH); sub(/".*/, "", s); return s }
       return ""
@@ -52,16 +61,34 @@ _joystick_rotate_log() {
     END {
       from = NR - keep + 1; if (from < 1) from = 1
       n = 0
-      for (id in open) if (open[id] < from) keep_ln[n++] = open[id]   # open starts in the dropped head
+      for (id in open) if (open[id] < from) {   # open starts in the dropped head
+        is_open[open[id]] = 1; keep_ln[n++] = open[id]
+      }
       for (i = 1; i < n; i++) {                                       # insertion-sort into chronological order
         v = keep_ln[i]; j = i - 1
         while (j >= 0 && keep_ln[j] > v) { keep_ln[j+1] = keep_ln[j]; j-- }
         keep_ln[j+1] = v
       }
+      for (i = 1; i < from; i++)                                      # dropped head → archive sidecar
+        if (!(i in is_open)) print line[i] > arch
       for (i = 0; i < n; i++) print line[keep_ln[i]]                  # preserved open starts, oldest first
       for (i = from; i <= NR; i++) print line[i]                      # then the recent tail
     }
   ' "$log" > "$log.tmp" && mv "$log.tmp" "$log" && chmod 600 "$log" 2>/dev/null
+  if [[ -s $log.arch.tmp ]]; then
+    cat "$log.arch.tmp" >> "$arch" && chmod 600 "$arch" 2>/dev/null
+  fi
+  rm -f "$log.arch.tmp"
+  # Age out archive lines past the retention window. ts is epoch seconds; a line
+  # without a parseable ts is kept (never silently destroy data on a format we
+  # didn't expect). Cutoff is exclusive so a just-written line always survives.
+  if [[ -f $arch ]]; then
+    local cutoff=$(( EPOCHSECONDS - days * 86400 ))
+    awk -v cutoff="$cutoff" '
+      { if (match($0, /"ts":[0-9]+/) && substr($0, RSTART + 5, RLENGTH - 5) + 0 < cutoff) next
+        print }
+    ' "$arch" > "$arch.tmp" && mv "$arch.tmp" "$arch" && chmod 600 "$arch" 2>/dev/null
+  fi
 }
 
 # Housekeeping once per shell startup: rotate the log past ~5MB and drop

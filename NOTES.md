@@ -401,6 +401,34 @@ lifted into a shared `retireSuperseded` helper so `start` and `reset` can't drif
 Covered by eventfold test 14. (Exit-then-restart still clears on the first prompt, not
 instantly — that's a new process, so no pid match at SessionStart; acceptable.)
 
+## Today digest + archive-on-rotate (2026-07-02)
+
+A short bulleted recap of the day, window-only: the note button in the header /
+⌘Y swaps the list for one section per repo — a bullet per Claude session (goal >
+rename > ai-title > first prompt, turn count, summed time, Claude's last closing
+blurb capped at 160 chars, the worktree chip) and one dimmed aggregate line of
+shell activity (commands · commits · failed · longest op ≥2min, interactive apps
+excluded via the taxonomy IGNORE set, now shared in EventLog.swift). Copy button
+/ ⌘C puts the whole thing on the pasteboard as Markdown for standup notes; esc
+returns to the mirror. Selection, not generation: every line is data the log
+already holds (the closing blurbs ARE the summary — Claude wrote them at turn
+close), so the recap is deterministic, offline, and instant. An LLM-polish pass
+was considered and declined for v1: it would break principle #6 for marginal
+gain. `DayDigest` is a pure Foundation-only fold beside `EventFold`
+(deliberately NOT the fold itself — the live mirror retires /clear'd sessions
+and trims done, exactly the history a recap must keep), tested by
+tests/daydigest-test.sh. Day boundary = the tally's 4am rule.
+
+Data gap this exposed: rotation truncated to 2000 lines — less than one busy day
+(Jun 30 was 2,692) — so a mid-afternoon rotation would eat the morning from the
+recap, and "yesterday" always died. Rotation now appends the dropped head to
+`events-archive.jsonl` (same dir → same 600/TM-exclusion; open starts stay live-
+log-only so the pair never double-counts), pruned to 90 days at each rotation.
+The digest reads live + today's archive slice (archive mtime = last rotation, so
+it's only read on days a rotation actually happened). The 5MB trigger stays: a
+bigger live log only slows cold reads and widens the plaintext window; the
+archive is the durable answer. Weekly/yesterday recaps are now cheap follow-ups.
+
 ## Roadmap
 
 ### v0.1 — shareable (1–2 weekends)

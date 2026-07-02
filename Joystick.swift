@@ -93,6 +93,13 @@ final class Store: ObservableObject {
     // robust where the anchored popover was janky.
     @Published var composing = false
     @Published var composeDraft = ""
+    // The Today digest (⌘Y / the note button): a short bulleted recap of the
+    // day, built on demand from a fresh read of the log (+ today's slice of the
+    // rotation archive). Window-only, like the queue — the menubar stays a calm
+    // needs-you glance. `digest` is a snapshot from open time, not live-updating:
+    // a recap you're reading shouldn't reflow under your eyes.
+    @Published var showDigest = false
+    @Published var digest: DayDigest? = nil
 
     static let minRunningSecs = 5.0
     static let minDoneSecs = 10.0
@@ -102,7 +109,7 @@ final class Store: ObservableObject {
                                            // started >2min after its op began is a recycled pid, not ours
     static let maxDone = 20
     static let historyCap = 3
-    static let ignore: Set<String> = ["claude", "claude2", "vim", "nvim", "less", "man", "top", "htop", "tmux"]
+    static let ignore = interactiveApps   // the taxonomy's IGNORE set (EventLog.swift)
     nonisolated static let stallSecs = 20.0
     static let backstopSecs = 10.0   // safety-net reload cadence; the FS watch does the real work
 
@@ -362,6 +369,68 @@ final class Store: ObservableObject {
             .map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state")
         return base.appendingPathComponent("joystick/events.jsonl")
+    }
+
+    // Rotation's sidecar (joystick.zsh): the head that rotation dropped from the
+    // live log, so a day whose morning rotated out is still summarizable.
+    private var archiveURL: URL {
+        logURL.deletingLastPathComponent().appendingPathComponent("events-archive.jsonl")
+    }
+
+    // MARK: Today digest
+
+    func toggleDigest() { showDigest ? closeDigest() : openDigest() }
+
+    func openDigest() {
+        endCompose()
+        digest = buildDigest()
+        showDigest = true
+    }
+
+    func closeDigest() { showDigest = false }
+
+    var digestDayLabel: String {
+        let f = DateFormatter()
+        f.dateFormat = "EEE MMM d"
+        let day = Date(timeIntervalSince1970: digest?.dayStart
+                       ?? EventFold.fourAMDayStart(Date()))
+        return "Today — \(f.string(from: day))"
+    }
+
+    func copyDigest() {
+        guard let d = digest else { return }
+        copyToPasteboard(d.markdown(dayLabel: digestDayLabel))
+    }
+
+    // A fresh full read rather than a peek at the incremental fold: the fold
+    // retires /clear'd sessions and trims done — history the recap must keep.
+    // ≤5MB of JSONL parses in well under a beat on a button press.
+    private func buildDigest() -> DayDigest {
+        let dayStart = EventFold.fourAMDayStart(Date())
+        let decoder = JSONDecoder()
+        var events: [RawEvent] = []
+        func slurp(_ url: URL, onlyToday: Bool) {
+            guard let data = try? Data(contentsOf: url) else { return }
+            for line in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
+                guard let e = try? decoder.decode(RawEvent.self, from: Data(line)) else { continue }
+                if !onlyToday || e.ts >= dayStart { events.append(e) }
+            }
+        }
+        // Archive first (it's the older half, and build() wants log order). Only
+        // read when a rotation actually happened today — the file is only ever
+        // written on rotation, so its mtime is the last rotation time. Its lines
+        // are filtered to today; the live log is fed whole, because build() needs
+        // pre-4am context the window filter would strip (a session's last meta —
+        // its rename/goal — can predate the boundary).
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: archiveURL.path),
+           let m = attrs[.modificationDate] as? Date,
+           m.timeIntervalSince1970 >= dayStart {
+            slurp(archiveURL, onlyToday: true)
+        }
+        slurp(logURL, onlyToday: false)
+        return DayDigest.build(events: events, dayStart: dayStart,
+                               now: Date().timeIntervalSince1970,
+                               home: NSHomeDirectory())
     }
 
     func reload() {
@@ -1222,13 +1291,6 @@ final class Store: ObservableObject {
 }
 
 // MARK: - Formatting
-
-func fmt(_ seconds: Double) -> String {
-    let t = max(0, Int(seconds))
-    if t < 60 { return "\(t)s" }
-    if t < 3600 { return String(format: "%dm%02ds", t / 60, t % 60) }
-    return String(format: "%dh%02dm", t / 3600, (t % 3600) / 60)
-}
 
 func tilde(_ path: String) -> String {
     let home = NSHomeDirectory()
@@ -2102,8 +2164,11 @@ struct ContentView: View {
             header
             Divider()
             if keyboardNav {
-                // While queueing, the filter swaps to a compose field for the row.
-                if store.composing { composeBar } else { searchField }
+                // While queueing, the filter swaps to a compose field for the
+                // row; while the Today digest is up, to its title bar.
+                if store.showDigest { digestBar }
+                else if store.composing { composeBar }
+                else { searchField }
                 Divider()
             }
             if store.showSetupBanner {
@@ -2112,7 +2177,10 @@ struct ContentView: View {
             if store.automation == .denied {
                 PermissionBanner()
             }
-            opList
+            // The digest replaces the list, never floats over it — one thing on
+            // screen at a time, and esc always returns to the mirror. Gated on
+            // keyboardNav so the menubar popover (same Store) never swaps.
+            if keyboardNav && store.showDigest { digestView } else { opList }
             if keyboardNav {
                 Divider()
                 hintFooter
@@ -2164,11 +2232,18 @@ struct ContentView: View {
             guard keyboardNav, !on else { return }
             DispatchQueue.main.async { searchFocused = true }
         }
+        // Same hand-back when the Today recap closes: the filter field only
+        // re-enters the hierarchy on this flip, so focus must be re-asserted.
+        .onChange(of: store.showDigest) { _, on in
+            guard keyboardNav, !on else { return }
+            DispatchQueue.main.async { searchFocused = true }
+        }
         // Hotkey summon: clear any stale filter and pre-select the top "needs
         // you" row, then grab the field so you can type-to-filter immediately.
         .onReceive(NotificationCenter.default.publisher(for: Summoner.didSummon)) { _ in
             guard keyboardNav else { return }
             styleMainWindow()   // re-assert non-opacity in case SwiftUI reset it
+            store.closeDigest() // summon means "get me to a terminal", not the recap
             store.filterText = ""
             store.selectForSummon()
             searchFocused = true
@@ -2224,12 +2299,134 @@ struct ContentView: View {
     }
 
     private var hintFooter: some View {
-        Text("↑↓ move · ⏎ focus · ⌘K queue · ⌘↑↓ reorder · ⌘1–9 jump · esc close")
+        Text(store.showDigest
+             ? "⌘C copy · esc back"
+             : "↑↓ move · ⏎ focus · ⌘K queue · ⌘↑↓ reorder · ⌘1–9 jump · esc close")
             .font(.system(.caption2))
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
+    }
+
+    // The digest's title bar, in the filter field's slot (same swap the compose
+    // bar does): the day label + an explicit Copy, so the mouse path is as short
+    // as the ⌘C one.
+    private var digestBar: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "note.text")
+                .font(.caption).foregroundStyle(Color.summaryYellow)
+            Text(store.digestDayLabel)
+                .font(.system(.caption).weight(.semibold))
+            Spacer()
+            Button { store.copyDigest() } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+                    .font(.caption)
+                    .labelStyle(.titleAndIcon)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Copy today's recap as Markdown (⌘C)")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+    }
+
+    // The Today recap: one section per repo — Claude sessions as bullets (label,
+    // turns, time, closing blurb), then a dimmed one-line shell aggregate. Reads
+    // top-to-bottom as "what did I do today", newest-heaviest repo first.
+    private var digestView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                if let d = store.digest, !d.isEmpty {
+                    ForEach(Array(d.repos.enumerated()), id: \.element.name) { _, repo in
+                        digestRepoSection(repo)
+                    }
+                    if !d.externals.isEmpty {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("external")
+                                .font(.system(.subheadline).weight(.semibold))
+                            // Keyed by position: two identical external ops
+                            // (same cmd, same duration) are legal log content.
+                            ForEach(Array(d.externals.enumerated()), id: \.offset) { _, x in
+                                digestBullet { Text(x).font(.caption) }
+                            }
+                        }
+                    }
+                } else {
+                    Text("Nothing yet today — the day starts at 4am.")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+        }
+    }
+
+    private func digestRepoSection(_ repo: DayDigest.Repo) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(repo.name)
+                .font(.system(.subheadline).weight(.semibold))
+            ForEach(Array(repo.sessions.enumerated()), id: \.offset) { _, s in
+                digestBullet {
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 5) {
+                            Text(s.label)
+                                .font(.caption)
+                                .lineLimit(2)
+                            if !s.worktree.isEmpty { WorktreeChip(name: s.worktree) }
+                            Text("\(s.turns) turn\(s.turns == 1 ? "" : "s") · \(fmt(s.secs))")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                                .layoutPriority(1)
+                        }
+                        if !s.blurb.isEmpty {
+                            Text(s.blurb)
+                                .font(.caption2)
+                                .foregroundStyle(Color.summaryYellow)
+                                .lineLimit(2)
+                        }
+                    }
+                }
+            }
+            if repo.moreSessions > 0 {
+                digestBullet {
+                    Text("+\(repo.moreSessions) more session\(repo.moreSessions == 1 ? "" : "s")")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            digestShellLine(repo)
+        }
+    }
+
+    @ViewBuilder
+    private func digestShellLine(_ repo: DayDigest.Repo) -> some View {
+        let agg: [String] = [
+            repo.commands > 0 ? "\(repo.commands) command\(repo.commands == 1 ? "" : "s")" : nil,
+            repo.commits > 0 ? "\(repo.commits) commit\(repo.commits == 1 ? "" : "s")" : nil,
+            repo.fails > 0 ? "\(repo.fails) failed" : nil,
+            !repo.longestCmd.isEmpty ? "longest: \(repo.longestCmd) \(fmt(repo.longestSecs))" : nil,
+        ].compactMap { $0 }
+        if !agg.isEmpty {
+            digestBullet {
+                Text(agg.joined(separator: " · "))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    private func digestBullet<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Text("•").font(.caption).foregroundStyle(.tertiary)
+            content()
+        }
+        .padding(.leading, 6)
     }
 
     private var header: some View {
@@ -2252,6 +2449,17 @@ struct ContentView: View {
                 .font(.system(.caption))
                 .foregroundStyle(.secondary)
                 .help("Shell commands + Claude turns today (the day starts at 4am)")
+            // The day's notepad, window-only like the queue: same quiet-icon
+            // grammar as the pin, gold while the recap is open.
+            if keyboardNav {
+                Button { store.toggleDigest() } label: {
+                    Image(systemName: "note.text")
+                        .font(.system(size: 12))
+                        .foregroundStyle(store.showDigest ? Color.summaryYellow : .secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Today at a glance — a short recap of the day (⌘Y)")
+            }
             // Pin as a quiet icon button rather than a labelled switch — the
             // "Pin" word + toggle track crowded the header's trailing edge; a
             // single pin glyph (gold when on) says the same in a fraction of the
@@ -2378,6 +2586,19 @@ struct ContentView: View {
                     }
                 }
                 let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                // Digest mode (the Today recap is up): esc/⌘Y back, ⌘C copies.
+                // Everything WITHOUT ⌘ is swallowed — no text field is focused
+                // while the recap shows, so a stray keystroke would otherwise
+                // reach the window and beep. ⌘-chords that aren't ours pass
+                // through so ⌘Q/⌘W/menu equivalents keep working.
+                if store.showDigest {
+                    if Int(event.keyCode) == 53 { store.closeDigest(); return true }   // esc
+                    if flags == .command, let ch = event.charactersIgnoringModifiers {
+                        if ch == "y" { store.closeDigest(); return true }
+                        if ch == "c" { store.copyDigest(); return true }
+                    }
+                    return !flags.contains(.command)
+                }
                 switch Int(event.keyCode) {
                 // ⌘ test is `.contains`, NOT `== .command`: macOS reports arrow
                 // keys as function keys, so their flags ALWAYS carry .numericPad
@@ -2404,6 +2625,10 @@ struct ContentView: View {
                 }
                 if flags == .command, let ch = event.charactersIgnoringModifiers, ch == "k" {
                     store.openQueueForSelection()   // ⌘K — queue a prompt for the selected row
+                    return true
+                }
+                if flags == .command, let ch = event.charactersIgnoringModifiers, ch == "y" {
+                    store.toggleDigest()   // ⌘Y — the Today recap (digest mode above handles closing)
                     return true
                 }
                 if flags == .command, let ch = event.charactersIgnoringModifiers,

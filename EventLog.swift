@@ -310,3 +310,221 @@ struct EventFold {
         return kind == "shell" || kind == "claude"
     }
 }
+
+// The interactive-app IGNORE set of the terminal taxonomy (principle #4): a
+// command that IS the terminal session (an editor, a pager, the claude TUI) is
+// neither an operation nor a service — the viewer never shows it as a row, and
+// the day digest must not count it as shell activity (a `claude` process alive
+// for 7h is a hosted session, not "your longest command"). Matched on the first
+// token, the same way Store.ignored() does.
+let interactiveApps: Set<String> = ["claude", "claude2", "vim", "nvim", "less", "man", "top", "htop", "tmux"]
+
+func isInteractiveApp(_ cmd: String) -> Bool {
+    interactiveApps.contains(cmd.split(separator: " ").first.map(String.init) ?? "")
+}
+
+// Compact duration ("42s", "3m07s", "2h13m"). Lives here, not in Joystick.swift,
+// so the Foundation-only test binaries can use it too — the app links this file.
+func fmt(_ seconds: Double) -> String {
+    let t = max(0, Int(seconds))
+    if t < 60 { return "\(t)s" }
+    if t < 3600 { return String(format: "%dm%02ds", t / 60, t % 60) }
+    return String(format: "%dh%02dm", t / 3600, (t % 3600) / 60)
+}
+
+// MARK: - DayDigest
+
+// A deterministic bulleted recap of the day (4am-aligned, same boundary as the
+// header tally): one bullet per Claude session — its goal/rename/title/prompt
+// plus Claude's own closing blurb — and one aggregate line of shell activity
+// per repo. Selection, not generation: every line is data already in the log,
+// and the only "rules" are fixed sorts and caps (principle #3's spirit — fully
+// predictable, no cleverness).
+//
+// Deliberately NOT built on EventFold: the fold's job is the LIVE mirror, so it
+// retires superseded sessions (/clear, /resume) and trims done — exactly the
+// history a recap must keep. The digest re-reads the day's slice on demand
+// instead; at ≤ a few thousand lines that's milliseconds.
+struct DayDigest {
+    struct Session {
+        let label: String       // goal > rename > title > first prompt of the day
+        let turns: Int          // prompts submitted today
+        let secs: Double        // summed turn durations (an open turn counts to `now`)
+        let blurb: String       // Claude's last closing blurb today ("" if none)
+        let worktree: String    // linked-worktree leaf ("" for the main checkout)
+    }
+    struct Repo {
+        let name: String        // first path component under ~, or the bare path
+        var sessions: [Session] = []
+        var moreSessions = 0    // sessions beyond maxSessionsPerRepo (never hidden silently)
+        var commands = 0        // shell commands started today
+        var fails = 0           // ...of which exited non-zero
+        var commits = 0         // ...of which were `git commit`
+        var longestCmd = ""     // longest shell op of the day, if ≥ minNotableSecs
+        var longestSecs = 0.0
+    }
+    let dayStart: Double
+    let repos: [Repo]           // busiest first (Claude seconds, then command count)
+    let externals: [String]     // `joystick log` ops today, one rendered line each
+
+    static let maxSessionsPerRepo = 4
+    static let minNotableSecs = 120.0
+    static let maxBlurbChars = 160   // a recap quotes the blurb, it doesn't reprint it
+
+    // "joystick" for ~/joystick/tests; the bare path outside $HOME; "~" at $HOME.
+    static func repoKey(_ cwd: String, home: String) -> String {
+        guard !cwd.isEmpty else { return "~" }
+        guard cwd.hasPrefix(home) else { return cwd }
+        guard let first = cwd.dropFirst(home.count).split(separator: "/").first
+        else { return "~" }
+        return String(first)
+    }
+
+    static func build(events: [RawEvent], dayStart: Double, now: Double, home: String) -> DayDigest {
+        struct SessAcc {
+            var firstPrompt = ""; var turns = 0; var secs = 0.0; var blurb = ""
+            var cwd = ""; var openStart: Double? = nil
+        }
+        struct MetaAcc { var title = ""; var name = ""; var goal = ""; var wt = "" }
+        // `start` info by id, so an `end` (which carries neither kind nor cwd)
+        // can find its op — and be ignored when the op began before today.
+        var started: [String: (kind: String, cwd: String, ts: Double, cmd: String)] = [:]
+        var sess: [String: SessAcc] = [:]           // claude-<sid> → today's accumulation
+        var metas: [String: MetaAcc] = [:]          // last meta wins, today or not
+        var shell: [String: Repo] = [:]             // repoKey → aggregates
+        var externals: [String] = []
+
+        for e in events {
+            switch e.ev {
+            case "start":
+                let kind = e.kind ?? (e.tty == "claude" ? "claude"
+                                      : e.tty == "cli" ? "external" : "shell")
+                started[e.id] = (kind, e.cwd ?? "", e.ts, e.cmd ?? "")
+                guard e.ts >= dayStart else { break }
+                switch kind {
+                case "claude":
+                    var s = sess[e.id] ?? SessAcc()
+                    if s.turns == 0 {
+                        // Prompts land as "» text"; the marker is row chrome, not content.
+                        var p = e.cmd ?? ""
+                        if p.hasPrefix("» ") { p = String(p.dropFirst(2)) }
+                        s.firstPrompt = p
+                    }
+                    s.turns += 1
+                    s.openStart = e.ts
+                    if let c = e.cwd, !c.isEmpty { s.cwd = c }
+                    sess[e.id] = s
+                case "shell":
+                    // Interactive apps (the taxonomy's IGNORE set) aren't ops:
+                    // a 7h `claude` or `vim` is a hosted session, not activity.
+                    guard !isInteractiveApp(e.cmd ?? "") else { break }
+                    let key = repoKey(e.cwd ?? "", home: home)
+                    var r = shell[key] ?? Repo(name: key)
+                    r.commands += 1
+                    if (e.cmd ?? "").hasPrefix("git commit") { r.commits += 1 }
+                    shell[key] = r
+                default:
+                    break   // externals render from their end (below)
+                }
+            case "end":
+                guard let s0 = started[e.id], s0.ts >= dayStart else { break }
+                let dur = e.dur ?? max(0, e.ts - s0.ts)
+                switch s0.kind {
+                case "claude":
+                    guard var s = sess[e.id] else { break }
+                    s.secs += dur
+                    s.openStart = nil
+                    if let m = e.msg, !m.isEmpty { s.blurb = m }
+                    sess[e.id] = s
+                case "shell":
+                    guard !isInteractiveApp(s0.cmd) else { break }
+                    let key = repoKey(s0.cwd, home: home)
+                    guard var r = shell[key] else { break }
+                    if (e.exit ?? 0) != 0 { r.fails += 1 }
+                    if dur >= Self.minNotableSecs, dur > r.longestSecs {
+                        r.longestCmd = s0.cmd; r.longestSecs = dur
+                    }
+                    shell[key] = r
+                default:
+                    let mark = (e.exit ?? 0) == 0 ? "✓" : "✗"
+                    externals.append("\(s0.cmd) \(mark) (\(fmt(dur)))")
+                }
+            case "meta":
+                metas[e.id] = MetaAcc(title: e.title ?? "", name: e.name ?? "",
+                                      goal: e.goal ?? "", wt: e.wt ?? "")
+            default:
+                break
+            }
+        }
+
+        // A turn still running gets credited up to `now` — the digest is often
+        // read while the day's last session is mid-flight.
+        var repos: [String: Repo] = shell
+        for (sid, var s) in sess {
+            if let o = s.openStart { s.secs += max(0, now - o) }
+            let m = metas[sid] ?? MetaAcc()
+            let label = !m.goal.isEmpty ? m.goal
+                      : !m.name.isEmpty ? m.name
+                      : !m.title.isEmpty ? m.title : s.firstPrompt
+            var blurb = s.blurb
+            if blurb.count > Self.maxBlurbChars {
+                blurb = String(blurb.prefix(Self.maxBlurbChars - 1)) + "…"
+            }
+            let key = repoKey(s.cwd, home: home)
+            var r = repos[key] ?? Repo(name: key)
+            r.sessions.append(Session(label: label, turns: s.turns, secs: s.secs,
+                                      blurb: blurb, worktree: m.wt))
+            repos[key] = r
+        }
+        var out = repos.values.map { r -> Repo in
+            var r = r
+            r.sessions.sort { $0.secs != $1.secs ? $0.secs > $1.secs : $0.label < $1.label }
+            if r.sessions.count > Self.maxSessionsPerRepo {
+                r.moreSessions = r.sessions.count - Self.maxSessionsPerRepo
+                r.sessions.removeLast(r.moreSessions)
+            }
+            return r
+        }
+        out.sort {
+            let a = $0.sessions.reduce(0) { $0 + $1.secs }
+            let b = $1.sessions.reduce(0) { $0 + $1.secs }
+            if a != b { return a > b }
+            if $0.commands != $1.commands { return $0.commands > $1.commands }
+            return $0.name < $1.name
+        }
+        return DayDigest(dayStart: dayStart, repos: out, externals: externals)
+    }
+
+    var isEmpty: Bool { repos.isEmpty && externals.isEmpty }
+
+    // The copyable form — what lands on the pasteboard and in standup notes.
+    func markdown(dayLabel: String) -> String {
+        var lines = ["# \(dayLabel)"]
+        for r in repos {
+            lines.append("")
+            lines.append("## \(r.name)")
+            for s in r.sessions {
+                var l = "- \(s.label)"
+                if !s.worktree.isEmpty { l += " ⎇\(s.worktree)" }
+                l += " (\(s.turns) turn\(s.turns == 1 ? "" : "s"), \(fmt(s.secs)))"
+                if !s.blurb.isEmpty { l += " — \(s.blurb)" }
+                lines.append(l)
+            }
+            if r.moreSessions > 0 {
+                lines.append("- +\(r.moreSessions) more session\(r.moreSessions == 1 ? "" : "s")")
+            }
+            var agg: [String] = []
+            if r.commands > 0 { agg.append("\(r.commands) command\(r.commands == 1 ? "" : "s")") }
+            if r.commits > 0 { agg.append("\(r.commits) commit\(r.commits == 1 ? "" : "s")") }
+            if r.fails > 0 { agg.append("\(r.fails) failed") }
+            if !r.longestCmd.isEmpty { agg.append("longest: \(r.longestCmd) \(fmt(r.longestSecs))") }
+            if !agg.isEmpty { lines.append("- \(agg.joined(separator: " · "))") }
+        }
+        if !externals.isEmpty {
+            lines.append("")
+            lines.append("## external")
+            for x in externals { lines.append("- \(x)") }
+        }
+        return lines.joined(separator: "\n")
+    }
+}
