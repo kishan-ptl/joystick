@@ -381,13 +381,9 @@ final class Store: ObservableObject {
 
     func toggleDigest() { showDigest ? closeDigest() : openDigest() }
 
-    // The recap exists to be pasted into a standup note, so opening it IS the
-    // copy — the Markdown lands on the pasteboard with no further gesture. The
-    // bar's Copy button and ⌘C remain for re-copying after the clipboard moved on.
     func openDigest() {
         endCompose()
         digest = buildDigest()
-        copyDigest()
         showDigest = true
     }
 
@@ -2314,18 +2310,15 @@ struct ContentView: View {
     }
 
     // The digest's title bar, in the filter field's slot (same swap the compose
-    // bar does): the day label, the quiet fact that the recap is already on the
-    // clipboard (opening copied it), and a re-copy button for after the
-    // clipboard has moved on.
+    // bar does): the day label + an explicit Copy, so the mouse path is as short
+    // as the ⌘C one. Copying is deliberately explicit, never a side effect of
+    // opening — a glance at the recap must not clobber the clipboard.
     private var digestBar: some View {
         HStack(spacing: 6) {
             Image(systemName: "note.text")
                 .font(.caption).foregroundStyle(Color.summaryYellow)
             Text(store.digestDayLabel)
                 .font(.system(.caption).weight(.semibold))
-            Text("· copied to clipboard")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
             Spacer()
             Button { store.copyDigest() } label: {
                 Label("Copy", systemImage: "doc.on.doc")
@@ -2334,7 +2327,7 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
-            .help("Copy again as Markdown (⌘C) — it was already copied on open")
+            .help("Copy today's recap as Markdown (⌘C)")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
@@ -2466,7 +2459,7 @@ struct ContentView: View {
                         .foregroundStyle(store.showDigest ? Color.summaryYellow : .secondary)
                 }
                 .buttonStyle(.plain)
-                .help("Today's standup recap — opens AND copies it to the clipboard (⌘Y)")
+                .help("Today's standup recap (⌘Y)")
             }
             // Pin as a quiet icon button rather than a labelled switch — the
             // "Pin" word + toggle track crowded the header's trailing edge; a

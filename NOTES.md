@@ -409,10 +409,11 @@ rename > ai-title > first prompt, turn count, summed time, Claude's last closing
 blurb capped at 160 chars, the worktree chip) and one dimmed aggregate line of
 shell activity (commands · commits · failed · longest op ≥2min, interactive apps
 excluded via the taxonomy IGNORE set, now shared in EventLog.swift). The recap
-exists to be pasted into a standup note, so OPENING IT IS THE COPY — the
-Markdown lands on the pasteboard with no further gesture (the bar says so; the
-Copy button / ⌘C re-copy after the clipboard moves on); esc returns to the
-mirror. Selection, not generation: every line is data the log
+exists to be pasted into a standup note; the Copy button / ⌘C put it on the
+pasteboard as Markdown, and esc returns to the mirror. Auto-copy-on-open was
+tried and walked back the same day (2026-07-03): with an explicit Copy one
+click away, a glance at the recap silently clobbering the clipboard cost more
+than the click it saved. Selection, not generation: every line is data the log
 already holds (the closing blurbs ARE the summary — Claude wrote them at turn
 close), so the recap is deterministic, offline, and instant. An LLM-polish pass
 was considered and declined for v1: it would break principle #6 for marginal
