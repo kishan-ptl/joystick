@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Tests _joystick_rotate_log (joystick.zsh): a rotation keeps the last $keep lines
 # AND preserves the start line of any still-open op, so a long-running service's
-# row survives a 5MB rotation instead of being deleted with the oldest lines.
+# row survives a rotation instead of being deleted with the oldest lines.
 # Run after changing the rotation block in joystick.zsh.
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 export XDG_STATE_HOME="$TMP/state"

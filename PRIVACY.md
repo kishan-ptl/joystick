@@ -76,7 +76,7 @@ secrets that look like ordinary words. For those, use the opt-outs below.
 
 - The log is `chmod 600` (only your user can read it).
 - The state directory is excluded from Time Machine backups.
-- The log auto-rotates past ~5MB (keeps the recent tail). Rotated-out lines
+- The log auto-rotates past ~10MB (keeps the recent tail). Rotated-out lines
   move to `events-archive.jsonl` in the same directory (same `600`, same
   Time Machine exclusion, same redaction — the lines were already masked at
   write time) so the in-app Today recap can cover a day whose morning rotated

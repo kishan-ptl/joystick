@@ -408,9 +408,11 @@ A short bulleted recap of the day, window-only: the note button in the header /
 rename > ai-title > first prompt, turn count, summed time, Claude's last closing
 blurb capped at 160 chars, the worktree chip) and one dimmed aggregate line of
 shell activity (commands · commits · failed · longest op ≥2min, interactive apps
-excluded via the taxonomy IGNORE set, now shared in EventLog.swift). Copy button
-/ ⌘C puts the whole thing on the pasteboard as Markdown for standup notes; esc
-returns to the mirror. Selection, not generation: every line is data the log
+excluded via the taxonomy IGNORE set, now shared in EventLog.swift). The recap
+exists to be pasted into a standup note, so OPENING IT IS THE COPY — the
+Markdown lands on the pasteboard with no further gesture (the bar says so; the
+Copy button / ⌘C re-copy after the clipboard moves on); esc returns to the
+mirror. Selection, not generation: every line is data the log
 already holds (the closing blurbs ARE the summary — Claude wrote them at turn
 close), so the recap is deterministic, offline, and instant. An LLM-polish pass
 was considered and declined for v1: it would break principle #6 for marginal
@@ -425,9 +427,12 @@ recap, and "yesterday" always died. Rotation now appends the dropped head to
 `events-archive.jsonl` (same dir → same 600/TM-exclusion; open starts stay live-
 log-only so the pair never double-counts), pruned to 90 days at each rotation.
 The digest reads live + today's archive slice (archive mtime = last rotation, so
-it's only read on days a rotation actually happened). The 5MB trigger stays: a
-bigger live log only slows cold reads and widens the plaintext window; the
-archive is the durable answer. Weekly/yesterday recaps are now cheap follow-ups.
+it's only read on days a rotation actually happened). The rotation trigger also
+went 5MB → 10MB (user call, 2026-07-03): the app tails the log incrementally so
+steady state doesn't care, only cold reads (launch/rotation/4am rollover) parse
+the whole file — doubling a sub-second cost — and ~5 weeks of in-app history
+beats ~2.5. The keep stays 2000; the archive, not the trigger, is what makes
+the recap whole. Weekly/yesterday recaps are now cheap follow-ups.
 
 ## Roadmap
 

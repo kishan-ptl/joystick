@@ -381,9 +381,13 @@ final class Store: ObservableObject {
 
     func toggleDigest() { showDigest ? closeDigest() : openDigest() }
 
+    // The recap exists to be pasted into a standup note, so opening it IS the
+    // copy — the Markdown lands on the pasteboard with no further gesture. The
+    // bar's Copy button and ⌘C remain for re-copying after the clipboard moved on.
     func openDigest() {
         endCompose()
         digest = buildDigest()
+        copyDigest()
         showDigest = true
     }
 
@@ -404,7 +408,7 @@ final class Store: ObservableObject {
 
     // A fresh full read rather than a peek at the incremental fold: the fold
     // retires /clear'd sessions and trims done — history the recap must keep.
-    // ≤5MB of JSONL parses in well under a beat on a button press.
+    // ≤10MB of JSONL parses in well under a beat on a button press.
     private func buildDigest() -> DayDigest {
         let dayStart = EventFold.fourAMDayStart(Date())
         let decoder = JSONDecoder()
@@ -652,7 +656,7 @@ final class Store: ObservableObject {
 
     // Watch the log for appends and fire a (debounced) reload. A vnode source on
     // the file fd delivers .write/.extend within ~tens of ms. On rotation (the
-    // log is rewritten via `mv` past 5MB) the .rename/.delete event re-arms the
+    // log is rewritten via `mv` past 10MB) the .rename/.delete event re-arms the
     // watch on the replacement file; if the log doesn't exist yet, retry until
     // the emitters create it.
     private func startWatching() {
@@ -1001,7 +1005,7 @@ final class Store: ObservableObject {
         // 4000. Long-running services (npx expo start, next dev, ngrok) have the
         // OLDEST starts, so they were the first to vanish on the next restart/rollover
         // even while their process stayed alive. The fold is bounded regardless: the
-        // log rotates at ~5MB and `done` is trimmed to maxDoneRetained below.
+        // log rotates at ~10MB and `done` is trimmed to maxDoneRetained below.
         let foldStart = 0
         // Count today's commands over all NEW lines incrementally, or over the whole
         // file during a day-change backfill. A plain cold read (rotation/restart)
@@ -2310,14 +2314,18 @@ struct ContentView: View {
     }
 
     // The digest's title bar, in the filter field's slot (same swap the compose
-    // bar does): the day label + an explicit Copy, so the mouse path is as short
-    // as the ⌘C one.
+    // bar does): the day label, the quiet fact that the recap is already on the
+    // clipboard (opening copied it), and a re-copy button for after the
+    // clipboard has moved on.
     private var digestBar: some View {
         HStack(spacing: 6) {
             Image(systemName: "note.text")
                 .font(.caption).foregroundStyle(Color.summaryYellow)
             Text(store.digestDayLabel)
                 .font(.system(.caption).weight(.semibold))
+            Text("· copied to clipboard")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
             Spacer()
             Button { store.copyDigest() } label: {
                 Label("Copy", systemImage: "doc.on.doc")
@@ -2326,7 +2334,7 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
-            .help("Copy today's recap as Markdown (⌘C)")
+            .help("Copy again as Markdown (⌘C) — it was already copied on open")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
@@ -2458,7 +2466,7 @@ struct ContentView: View {
                         .foregroundStyle(store.showDigest ? Color.summaryYellow : .secondary)
                 }
                 .buttonStyle(.plain)
-                .help("Today at a glance — a short recap of the day (⌘Y)")
+                .help("Today's standup recap — opens AND copies it to the clipboard (⌘Y)")
             }
             // Pin as a quiet icon button rather than a labelled switch — the
             // "Pin" word + toggle track crowded the header's trailing edge; a

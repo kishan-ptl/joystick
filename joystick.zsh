@@ -91,9 +91,9 @@ _joystick_rotate_log() {
   fi
 }
 
-# Housekeeping once per shell startup: rotate the log past ~5MB and drop
+# Housekeeping once per shell startup: rotate the log past ~10MB and drop
 # stale Claude session surface caches.
-if [[ -f $JOYSTICK_LOG ]] && (( $(stat -f %z "$JOYSTICK_LOG" 2>/dev/null || echo 0) > 5242880 )); then
+if [[ -f $JOYSTICK_LOG ]] && (( $(stat -f %z "$JOYSTICK_LOG" 2>/dev/null || echo 0) > 10485760 )); then
   _joystick_rotate_log
 fi
 command find "${JOYSTICK_LOG:h}" \( -name 'surface-*' -o -name 'waiting-*' -o -name 'cpid-*' \) -mtime +7 -delete 2>/dev/null
