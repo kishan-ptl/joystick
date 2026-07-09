@@ -131,7 +131,15 @@ _joystick_preexec() {
   local surface=${_joystick_surface:-}
   typeset -g _joystick_id="$$-$EPOCHSECONDS-$RANDOM"
   typeset -g _joystick_start=$EPOCHSECONDS
-  local cmd cwd raw=$1
+  # Log the ALIAS-EXPANDED command, not the raw token typed. preexec's $2 is the
+  # single-line, size-limited command with aliases already expanded ($1 is the
+  # verbatim keystrokes); fall back to $1 when history is off and $2 is empty.
+  # This is what makes the viewer's interactive-app IGNORE set work through an
+  # alias: `c` → `claude`, `v` → `nvim`, so the hosted-session row is suppressed
+  # instead of orphaned. It's also the more faithful cmd — what actually ran, not
+  # the shorthand — so heuristics keyed on the command (git-commit tally, head
+  # mode) see the real program too.
+  local cmd cwd raw=${2:-$1}
   if [[ ${JOYSTICK_LOG_MODE:-} == head ]]; then
     local -a w=(${(z)raw})
     raw=$w[1]
