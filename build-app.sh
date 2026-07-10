@@ -13,7 +13,7 @@ cp "$DIR/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 # Ship the emitter scripts + installer inside the bundle. First-run onboarding
 # ("Copy setup prompt" → Claude Code) runs Resources/install.sh, which copies
 # these out to $JOYSTICK_HOME and wires up the shell + Claude hooks.
-cp "$DIR"/install.sh "$DIR"/joystick.zsh "$DIR"/claude-hook.sh \
+cp "$DIR"/install.sh "$DIR"/joystick.zsh "$DIR"/claude-hook.sh "$DIR"/codex-hook.sh \
    "$DIR"/joystick-redact.zsh "$DIR"/joystick-focus.sh "$DIR"/joystick-send.sh "$APP/Contents/Resources/"
 chmod +x "$APP/Contents/Resources/"*.sh
 swiftc -O -swift-version 5 -parse-as-library "$DIR/EventLog.swift" "$DIR/Joystick.swift" -o "$APP/Contents/MacOS/Joystick"

@@ -16,6 +16,7 @@ shared state and doubles as the future integration API.
 - **Emitters** (tiny, stateless, fail-silent) append events:
   - `joystick.zsh` — zsh preexec/precmd hooks (`_joystick_*`), sourced from `~/.zshrc`.
   - `claude-hook.sh` — Claude Code hooks (UserPromptSubmit / PreToolUse / Stop(+StopFailure) / Notification / PostToolUse(+…Failure)) in `~/.claude/settings.json`. `PreToolUse` emits live activity at the *start* of a Task/Agent only (subagents run long; without it the row sits dead at "working" until the subagent finishes). On turn close it also emits a `meta` event (session title/model/mode/context) and attaches Claude's closing blurb as `msg` on the `end` event.
+  - `codex-hook.sh` — Codex CLI hooks (UserPromptSubmit / PostToolUse / PermissionRequest / Stop / SessionStart) in `~/.codex/hooks.json` (Codex 0.144+ has a Claude-compatible hooks engine, a *separate* layer from config.toml's single `notify` slot). `kind:"codex"`, `id:"codex-<sid>"`. Simpler than the Claude hook: every payload carries `model` + `permission_mode` (so `meta` needs no transcript parse) and `Stop` hands us the closing blurb as `last_assistant_message` (no transcript-poll race). Focused-core scope — no subagent/bg-shell/ctx/goal tracking yet. See NOTES.md "Codex adapter".
   - `joystick` CLI (`joystick log …`, tty `cli`) — external events from CI, webhooks, Makefiles. Symlinked onto PATH at `~/.local/bin/joystick`. Schema + usage in `EVENTS.md`.
 - **Event log** — `~/.local/state/joystick/events.jsonl`, append-only JSONL,
   one source of truth. Events: `start` / `end` / `waiting` / `active` / `meta`.
@@ -90,6 +91,8 @@ These were decided by using the tool; they define what it is.
   `dev.kishan.joystick`), then `pkill -x Joystick; open ~/Applications/Joystick.app`.
 - **After editing `joystick-redact.zsh`:** run `zsh tests/redact-test.zsh`
   (must stay green) — it's load-bearing.
+- **After editing `claude-hook.sh` / `codex-hook.sh`:** run `zsh tests/hook-test.zsh`
+  / `zsh tests/codex-hook-test.zsh` (the emitter regression harnesses).
 - **After editing `Joystick.swift`:** rebuild + restart (above) to see changes.
 - **After editing `EventLog.swift`:** run `zsh tests/eventfold-test.sh` AND
   `zsh tests/daydigest-test.sh` (both must stay green — the two Swift unit

@@ -447,14 +447,14 @@ final class Store: ObservableObject {
 
         // fold.open now holds only live-host ops, so this is just the cosmetic gate:
         // hide ignored interactive apps, and debounce trivial shell noise (a
-        // blink-and-gone `ls`/`cd` never flashes a row). External + Claude rows are
+        // blink-and-gone `ls`/`cd` never flashes a row). External + agent rows are
         // each a deliberate event — show them the instant they start, so a turn that
         // finishes in <minRunningSecs doesn't fall into the dead zone between "too
         // young to show running" and "too short to show done".
         var running = fold.open.values
             .filter { op in
                 guard !ignored(op.cmd) else { return false }
-                return op.isExternal || op.isClaude || nowTs - op.start >= Self.minRunningSecs
+                return op.isExternal || op.isAgent || nowTs - op.start >= Self.minRunningSecs
             }
 
         // Stall heuristic for shell ops (interactive prompts like `eas submit`):
@@ -493,28 +493,28 @@ final class Store: ObservableObject {
         notifyNewlyWaiting(running: running)
 
         // minDoneSecs hides trivial finished shell commands (a 2s `ls` leaves no
-        // row). Claude turns and external events are always meaningful — keep them
+        // row). Agent turns and external events are always meaningful — keep them
         // regardless of duration, so a quick turn doesn't vanish into the gap
         // between "too young to show running" and "too short to show done".
         let shown = fold.done.filter {
-            ($0.isExternal || $0.isClaude || ($0.dur ?? 0) >= Self.minDoneSecs) && !ignored($0.cmd)
+            ($0.isExternal || $0.isAgent || ($0.dur ?? 0) >= Self.minDoneSecs) && !ignored($0.cmd)
         }
-        // A live Claude session between turns sits in `done` (its last turn ended)
+        // A live agent session between turns sits in `done` (its last turn ended)
         // while the process stays alive — that's its normal resting state, the live
         // session mission-control exists to mirror, NOT stale history. So it must
         // survive the staleness cleanups (doneWindowSecs age-out, maxDone count cap)
-        // that exist to forget old shell results: keep every alive-Claude op, and
+        // that exist to forget old shell results: keep every alive-agent op, and
         // apply window + cap only to the rest. Liveness (the pid gate below) stays the
         // sole arbiter for these rows, per Principle #1. See NOTES.md.
-        var liveClaude: [Op] = [], rest: [Op] = []
+        var liveAgents: [Op] = [], rest: [Op] = []
         for op in shown {
-            if op.isClaude && alive(op.pid, since: op.start) { liveClaude.append(op) } else { rest.append(op) }
+            if op.isAgent && alive(op.pid, since: op.start) { liveAgents.append(op) } else { rest.append(op) }
         }
         let capped = Array(rest
             .filter { nowTs - ($0.endTs ?? 0) <= Self.doneWindowSecs }
             .sorted { ($0.endTs ?? 0) > ($1.endTs ?? 0) }
             .prefix(Self.maxDone))
-        var finished = (liveClaude + capped).sorted { ($0.endTs ?? 0) > ($1.endTs ?? 0) }
+        var finished = (liveAgents + capped).sorted { ($0.endTs ?? 0) > ($1.endTs ?? 0) }
 
         // Closing a tab IS the dismiss gesture: a finished op is dropped once
         // its hosting terminal is gone (noise, not history). How we know it's
@@ -522,18 +522,18 @@ final class Store: ObservableObject {
         //   shell  — its Ghostty surface no longer exists. The surface id is a
         //            reliable per-shell capture and UUIDs are never reused, so
         //            this never wrongly keeps or drops a row.
-        //   claude — its session process has exited. A Claude row's surface is
-        //            only a best-effort focused-surface snapshot (captured once
-        //            on the session's first prompt); it can point at the WRONG,
+        //   agent  — its session process (claude/codex) has exited. An agent row's
+        //            surface is only a best-effort focused-surface snapshot (captured
+        //            once on the session's first prompt); it can point at the WRONG,
         //            still-open pane, which would keep a closed session's rows
-        //            alive forever. The claude/node pid can't outlive its pane
+        //            alive forever. The agent pid can't outlive its pane
         //            (Ghostty SIGHUPs it on close), so pid-liveness is the
         //            trustworthy "is the host still here?" signal.
         //   external — no local host; TTL-gated above, never dropped here.
         pollLiveSurfaces()
         finished.removeAll { op in
             if op.isExternal { return false }
-            if op.isClaude { return !alive(op.pid, since: op.start) }
+            if op.isAgent { return !alive(op.pid, since: op.start) }
             guard let live = liveSurfaces else { return false }
             return !live.contains(op.surface)
         }
@@ -1327,6 +1327,13 @@ extension Color {
 
     static let claudeOrange = Color(red: 217 / 255, green: 119 / 255, blue: 87 / 255)
 
+    // Codex's working accent — a muted teal/emerald, deliberately OFF Claude's
+    // terracotta so two agent sessions in the same repo are told apart at a
+    // glance, and cooler/more saturated than the sage servingGreen so it doesn't
+    // read as "serving". This is the codex analogue of claudeOrange: the running
+    // agent's thinking-glyph tint and its live time color.
+    static let codexTeal = Color(hex: 0x1F9E86)
+
     // ctx-fill warnings on Claude rows: warm gold at 80%+, red at 90%+. Reuses
     // the waiting light's gold (0xFFC107) and the agent palette's Dracula red.
     static let ctxWarn = Color(hex: 0xFFC107)
@@ -1376,7 +1383,11 @@ extension Color {
 // The twinkling asterisk Claude shows while thinking, reproduced as a breathing
 // star so a working Claude row reads at a glance. Frame-cycled (not tweened) to
 // match the terminal spinner, in Claude's brand orange.
-struct ClaudeThinkingIcon: View {
+// The twinkling sparkle shown while an agent turn is in flight. Tinted per
+// agent (claudeOrange for Claude, codexTeal for Codex) so the two are legible
+// side by side; the animation itself is shared.
+struct AgentThinkingIcon: View {
+    var tint: Color = .claudeOrange
     private static let frames = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"]
     private static let interval = 0.16
 
@@ -1387,7 +1398,7 @@ struct ClaudeThinkingIcon: View {
             let step = Int(context.date.timeIntervalSinceReferenceDate / Self.interval)
             Text(Self.frames[step % Self.frames.count])
                 .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(Color.claudeOrange)
+                .foregroundStyle(tint)
                 .frame(width: 16, height: 16)   // fixed box so glyph width can't jitter the row
         }
     }
@@ -1398,7 +1409,7 @@ struct ClaudeThinkingIcon: View {
 // on/off blink. No glow/halo: the light stays contained within the circle's
 // perimeter. TimelineView drives the redraw, so it pauses when the row is
 // off-screen and survives row reloads with no manual Timer/@State to leak or
-// reset — same approach as ClaudeThinkingIcon.
+// reset — same approach as AgentThinkingIcon.
 struct WaitingLight: View {
     private static let period = 2.0          // seconds per full breath
     private static let fps = 24.0
@@ -1425,7 +1436,23 @@ func shortModel(_ m: String) -> String {
     if l.contains("sonnet") { return "Sonnet" }
     if l.contains("haiku") { return "Haiku" }
     if l.contains("fable") { return "Fable" }
+    // Codex/OpenAI slugs like "gpt-5.6-terra" → "GPT-5.6": keep the family +
+    // version, drop the trailing codename so the badge stays terse.
+    if l.hasPrefix("gpt-") {
+        let parts = m.split(separator: "-")
+        return parts.count >= 2 ? "GPT-\(parts[1])" : m.uppercased()
+    }
     return m
+}
+
+// A notably permissive agent mode that auto-approves tool use — worth a quiet
+// "⚠ bypass" on the row. Covers Claude's bypassPermissions and Codex's
+// full-access / danger / yolo permission modes (exact slug varies by version,
+// so match on substrings rather than an exact set).
+func isRiskyMode(_ mode: String) -> Bool {
+    let l = mode.lowercased()
+    return l.contains("bypass") || l.contains("full-access")
+        || l.contains("full_access") || l.contains("danger") || l.contains("yolo")
 }
 
 // The session's name — your rename if you set one, else Claude's auto topic —
@@ -1543,7 +1570,7 @@ struct OpRow: View {
                 // the row's focus, not this.
                 .font(.system(size: 10, weight: .regular).monospacedDigit())
                 .foregroundStyle(op.isService ? Color.servingGreen
-                                 : (op.isRunning && op.isClaude && !op.isWaiting) ? Color.claudeOrange
+                                 : (op.isRunning && op.isAgent && !op.isWaiting) ? (op.isCodex ? Color.codexTeal : Color.claudeOrange)
                                  : op.isRunning ? Color.accentColor : .secondary)
             // The ⌘1–9 jump keycap used to sit here; removed for now (it crowded the
             // command's trailing edge). The shortcut still works via the key monitor,
@@ -1563,8 +1590,8 @@ struct OpRow: View {
                 WaitingLight()         // soft yellow breathing light = needs you
             } else if op.isService {
                 Image(systemName: "antenna.radiowaves.left.and.right").foregroundStyle(Color.servingGreen)
-            } else if op.isRunning && op.isClaude {
-                ClaudeThinkingIcon()   // twinkling sparkle while a turn is in flight
+            } else if op.isRunning && op.isAgent {
+                AgentThinkingIcon(tint: op.isCodex ? .codexTeal : .claudeOrange)   // twinkling sparkle while a turn is in flight
             } else if op.isRunning {
                 Image(systemName: "play.circle.fill").foregroundStyle(.blue)
             } else if op.exitCode == 0 {
@@ -1619,8 +1646,8 @@ struct OpRow: View {
             parts.append(Text(code == -1 ? "killed" : "exit \(code)"))
         }
         if let end = op.endTs { parts.append(Text(fmt(nowTs - end) + " ago")) }
-        if op.isClaude {   // session context fill + model + notable mode (from meta)
-            if op.ctxTokens > 0 {
+        if op.isAgent {   // session context fill + model + notable mode (from meta)
+            if op.ctxTokens > 0 {   // Codex hooks don't report ctx tokens, so this is Claude-only in practice
                 let limit = op.ctxTokens > 200_000 ? 1_000_000.0 : 200_000.0
                 let pct = Int((op.ctxTokens / limit) * 100)
                 var seg = Text("\(pct)% ctx")
@@ -1634,7 +1661,9 @@ struct OpRow: View {
                 if hot { parts.insert(seg, at: 0) } else { parts.append(seg) }
             }
             if !op.model.isEmpty { parts.append(Text(shortModel(op.model))) }
-            if op.mode == "bypassPermissions" { parts.append(Text("⚠ bypass")) }
+            // Flag a notably permissive mode: Claude's bypassPermissions, or any
+            // of Codex's full-access / danger / yolo modes (auto-approves tools).
+            if isRiskyMode(op.mode) { parts.append(Text("⚠ bypass")) }
         }
         guard var joined = parts.first else { return Text("") }
         // Text interpolation (not `+`, deprecated in macOS 26) — keeps each run's
