@@ -15,7 +15,7 @@ import Foundation
 
 struct RawEvent: Decodable {
     let v: Int?            // schema version (1); absent on pre-versioning events
-    let kind: String?      // "shell" | "claude" | "external"; absent on legacy events (derive from tty)
+    let kind: String?      // "shell" | "claude" | "codex" | "external"; absent on legacy events (derive from tty)
     let ev: String
     let id: String
     let cmd: String?
@@ -52,7 +52,7 @@ struct Op: Identifiable {
     let cwd: String
     let tty: String        // real device for shell ops; "" for claude/external
     let surface: String
-    let kind: String       // "shell" | "claude" | "external"
+    let kind: String       // "shell" | "claude" | "codex" | "external"
     let pid: Int32
     let start: Double
     let seq: Int           // unique creation order, assigned by EventFold. SwiftUI identity
@@ -84,13 +84,19 @@ struct Op: Identifiable {
     var isRunning: Bool { endTs == nil }
     var isWaiting: Bool { isRunning && (waitingSince != nil || stallIdle != nil) }
     var isClaude: Bool { kind == "claude" }
+    var isCodex: Bool { kind == "codex" }
+    // An AI coding-agent session (Claude Code or Codex): both keep one stable
+    // session id across turns and are tracked by hooks, so they share the
+    // session-scoped behaviors below (id grouping, session-rotation retirement,
+    // the late-end supersede guard, and being kept alive by pid, not surface).
+    var isAgent: Bool { isClaude || isCodex }
     var isExternal: Bool { kind == "external" }   // `joystick log` (CI/webhooks); no local pid or surface
 
-    // Stable grouping identity. A Claude session keeps ONE id across all its
-    // turns (claude-<sid>), so group by that — robust even when surface
-    // capture misses. Shell commands have per-command ids, so they group by
-    // their Ghostty surface (the terminal they ran in).
-    var groupKey: String { isClaude ? key : (surface.isEmpty ? id : surface) }
+    // Stable grouping identity. An agent session keeps ONE id across all its
+    // turns (claude-<sid> / codex-<sid>), so group by that — robust even when
+    // surface capture misses. Shell commands have per-command ids, so they group
+    // by their Ghostty surface (the terminal they ran in).
+    var groupKey: String { isAgent ? key : (surface.isEmpty ? id : surface) }
 }
 
 // One row per Ghostty surface: what the terminal is doing now (or did last),
@@ -134,30 +140,32 @@ struct EventFold {
             // events written before the kind field existed.
             let kind = e.kind ?? (e.tty == "claude" ? "claude"
                                   : e.tty == "cli" ? "external" : "shell")
+            let isAgent = kind == "claude" || kind == "codex"
             // Session-id rotation: /clear, /resume and /compact each spin up a NEW
-            // claude-<sid> (so does exiting and restarting `claude` in a tab), and
-            // Claude rows group by that id — so the cleared conversation would
-            // otherwise linger as a stale DUPLICATE row for the same terminal,
-            // un-reapable because its pid is the still-alive claude process shared
-            // with the new session. A Ghostty surface hosts exactly one live claude
-            // process, so when a NEW claude session starts on a surface (or pid) an
-            // earlier one held, that earlier session is gone: retire its ops (open
-            // and recent history alike). Never the same id — that's the queued-prompt
-            // case handled just below. (A `reset` event does the same retirement at
-            // /clear time, before the first prompt — see that case.) See NOTES.md.
-            if kind == "claude" {
+            // claude-<sid> / codex-<sid> (so does exiting and restarting the agent
+            // in a tab), and agent rows group by that id — so the cleared
+            // conversation would otherwise linger as a stale DUPLICATE row for the
+            // same terminal, un-reapable because its pid is the still-alive agent
+            // process shared with the new session. A Ghostty surface hosts exactly
+            // one live agent process, so when a NEW agent session starts on a
+            // surface (or pid) an earlier one held, that earlier session is gone:
+            // retire its ops (open and recent history alike). Never the same id —
+            // that's the queued-prompt case handled just below. (A `reset` event
+            // does the same retirement at /clear time, before the first prompt —
+            // see that case.) See NOTES.md.
+            if isAgent {
                 retireSuperseded(byId: e.id, surface: e.surface ?? "", pid: e.pid ?? -1)
             }
-            // Out-of-order guard (Claude turns share one id across turns): a queued
+            // Out-of-order guard (agent turns share one id across turns): a queued
             // or auto-injected prompt's `start` can land in the log just BEFORE the
-            // prior turn's `end`. The Stop handler is slow — it reads the transcript
-            // for the closing blurb — while UserPromptSubmit, with surface+pid
-            // cached, is fast, so the new start overtakes the pending end. If we
-            // still hold an open op for this id, the prior turn ended but its end
-            // hasn't folded yet: close it out now so it survives as history, rather
-            // than let the late end (dropped below) swallow this NEW turn's op and
-            // freeze the new prompt as a finished row. See NOTES.md.
-            if kind == "claude", var prev = open[e.id] {
+            // prior turn's `end`. The Stop handler can lag — for Claude it reads the
+            // transcript for the closing blurb — while UserPromptSubmit, with
+            // surface+pid cached, is fast, so the new start overtakes the pending
+            // end. If we still hold an open op for this id, the prior turn ended but
+            // its end hasn't folded yet: close it out now so it survives as history,
+            // rather than let the late end (dropped below) swallow this NEW turn's op
+            // and freeze the new prompt as a finished row. See NOTES.md.
+            if isAgent, var prev = open[e.id] {
                 let gap = e.ts - prev.start
                 prev.endTs = e.ts
                 // Real duration only when the gap is plausible (the end was merely late);
@@ -177,7 +185,7 @@ struct EventFold {
             // from the same integer-second clock, so for the matching turn that
             // equals op.start exactly. A strictly-later open op is a newer turn (the
             // queued-prompt race above) — leave it live, don't close it.
-            if op.isClaude, let dur = e.dur, op.start > e.ts - dur { break }
+            if op.isAgent, let dur = e.dur, op.start > e.ts - dur { break }
             open.removeValue(forKey: e.id)
             op.endTs = e.ts
             op.exitCode = e.exit ?? 0
@@ -256,7 +264,7 @@ struct EventFold {
     // surface capture missed (live processes don't share pids).
     private mutating func retireSuperseded(byId id: String, surface: String, pid: Int32) {
         func superseded(_ op: Op) -> Bool {
-            op.isClaude && op.key != id
+            op.isAgent && op.key != id
                 && ((!surface.isEmpty && op.surface == surface) || (pid > 0 && op.pid == pid))
         }
         // Drop the retired session's bg shells and subagents too, so any whose
@@ -303,21 +311,22 @@ struct EventFold {
         return start.timeIntervalSince1970
     }
 
-    // Shell commands + Claude turns count toward the daily tally; external
-    // `joystick log` events don't (they aren't commands you ran).
+    // Shell commands + agent turns (Claude/Codex) count toward the daily tally;
+    // external `joystick log` events don't (they aren't commands you ran).
     static func countsTowardTally(_ e: RawEvent) -> Bool {
         let kind = e.kind ?? (e.tty == "claude" ? "claude" : e.tty == "cli" ? "external" : "shell")
-        return kind == "shell" || kind == "claude"
+        return kind == "shell" || kind == "claude" || kind == "codex"
     }
 }
 
 // The interactive-app IGNORE set of the terminal taxonomy (principle #4): a
-// command that IS the terminal session (an editor, a pager, the claude TUI) is
-// neither an operation nor a service — the viewer never shows it as a row, and
-// the day digest must not count it as shell activity (a `claude` process alive
-// for 7h is a hosted session, not "your longest command"). Matched on the first
-// token, the same way Store.ignored() does.
-let interactiveApps: Set<String> = ["claude", "claude2", "vim", "nvim", "less", "man", "top", "htop", "tmux"]
+// command that IS the terminal session (an editor, a pager, the claude/codex
+// TUI) is neither an operation nor a service — the viewer never shows it as a
+// row, and the day digest must not count it as shell activity (a `claude` or
+// `codex` process alive for 7h is a hosted session tracked via hooks, not "your
+// longest command"). Matched on the first token, the same way Store.ignored()
+// does.
+let interactiveApps: Set<String> = ["claude", "claude2", "codex", "vim", "nvim", "less", "man", "top", "htop", "tmux"]
 
 func isInteractiveApp(_ cmd: String) -> Bool {
     interactiveApps.contains(cmd.split(separator: " ").first.map(String.init) ?? "")
@@ -335,9 +344,10 @@ func fmt(_ seconds: Double) -> String {
 // MARK: - DayDigest
 
 // A deterministic bulleted recap of the day (4am-aligned, same boundary as the
-// header tally): one bullet per Claude session — its goal/rename/title/prompt
-// plus Claude's own closing blurb — and one aggregate line of shell activity
-// per repo. Selection, not generation: every line is data already in the log,
+// header tally): one bullet per agent session (Claude Code / Codex) — its
+// goal/rename/title/prompt plus the agent's own closing blurb — and one
+// aggregate line of shell activity per repo. Selection, not generation: every
+// line is data already in the log,
 // and the only "rules" are fixed sorts and caps (principle #3's spirit — fully
 // predictable, no cleverness).
 //
@@ -402,7 +412,7 @@ struct DayDigest {
                 started[e.id] = (kind, e.cwd ?? "", e.ts, e.cmd ?? "")
                 guard e.ts >= dayStart else { break }
                 switch kind {
-                case "claude":
+                case "claude", "codex":
                     var s = sess[e.id] ?? SessAcc()
                     if s.turns == 0 {
                         // Prompts land as "» text"; the marker is row chrome, not content.
@@ -430,7 +440,7 @@ struct DayDigest {
                 guard let s0 = started[e.id], s0.ts >= dayStart else { break }
                 let dur = e.dur ?? max(0, e.ts - s0.ts)
                 switch s0.kind {
-                case "claude":
+                case "claude", "codex":
                     guard var s = sess[e.id] else { break }
                     s.secs += dur
                     s.openStart = nil

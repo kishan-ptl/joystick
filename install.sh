@@ -10,13 +10,14 @@
 #   1. Copies the emitter scripts to $JOYSTICK_HOME (default ~/.config/joystick).
 #   2. Adds a guarded `source …/joystick.zsh` block to your ~/.zshrc.
 #   3. Merges Joystick's Claude Code hooks into ~/.claude/settings.json.
+#   4. If Codex is installed, merges its hooks into ~/.codex/hooks.json.
 #
 # Undo it all:           install.sh uninstall
 # The event log (~/.local/state/joystick) is YOUR data — uninstall never
 # touches it; the summary tells you how to delete it if you want.
 #
 # Testable without touching real files via env overrides:
-#   JOYSTICK_HOME, JOYSTICK_ZSHRC, JOYSTICK_CLAUDE_SETTINGS
+#   JOYSTICK_HOME, JOYSTICK_ZSHRC, JOYSTICK_CLAUDE_SETTINGS, JOYSTICK_CODEX_HOOKS
 set -u
 emulate -L zsh
 setopt no_nomatch
@@ -25,12 +26,13 @@ SELF=${0:A:h}
 JOYSTICK_HOME=${JOYSTICK_HOME:-$HOME/.config/joystick}
 ZSHRC=${JOYSTICK_ZSHRC:-${ZDOTDIR:-$HOME}/.zshrc}
 CLAUDE_SETTINGS=${JOYSTICK_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}
+CODEX_HOOKS=${JOYSTICK_CODEX_HOOKS:-$HOME/.codex/hooks.json}
 
 # The scripts that get installed. WIRED = the emitters/helpers placed in
-# $JOYSTICK_HOME (the zsh + Claude hooks reference some; the app invokes
+# $JOYSTICK_HOME (the zsh + Claude/Codex hooks reference some; the app invokes
 # joystick-focus.sh / joystick-send.sh). ALL also includes this installer so
 # `uninstall` lives next to them.
-WIRED=(joystick.zsh claude-hook.sh joystick-redact.zsh joystick-focus.sh joystick-send.sh)
+WIRED=(joystick.zsh claude-hook.sh codex-hook.sh joystick-redact.zsh joystick-focus.sh joystick-send.sh)
 ALL=($WIRED install.sh)
 
 MARK_BEGIN='# >>> joystick >>>'
@@ -115,6 +117,39 @@ install_hooks() {
   ok "7 hooks wired to $cmd"
 }
 
+# Codex 0.144+ ships a Claude-compatible hooks engine — the SAME nested
+# {hooks:{Event:[{hooks:[…]}]}} shape as Claude's settings.json, in its own
+# ~/.codex/hooks.json (a separate layer from config.toml's `notify`, so this
+# composes with the desktop-app notify client and any plugin hooks). Only wired
+# when Codex is present; skipped silently otherwise. Same idempotent merge as
+# Claude: strip is keyed on codex-hook.sh so re-runs don't stack.
+install_codex_hooks() {
+  command -v codex >/dev/null 2>&1 || [[ -d ${CODEX_HOOKS:h} ]] || return 0
+  command -v jq >/dev/null 2>&1 || { warn "jq missing — skipping Codex hooks"; return 0; }
+  bold "Codex hooks → ${CODEX_HOOKS/#$HOME/~}"
+  mkdir -p "${CODEX_HOOKS:h}"
+  [[ -s $CODEX_HOOKS ]] || print -r -- '{}' > "$CODEX_HOOKS"
+  jq empty "$CODEX_HOOKS" 2>/dev/null || { warn "${CODEX_HOOKS} isn't valid JSON — skipping Codex hooks"; return 0; }
+  backup "$CODEX_HOOKS"
+  local cmd="$JOYSTICK_HOME/codex-hook.sh" tmp; tmp=$(mktemp)
+  # UserPromptSubmit is synchronous (log the turn's start before it runs); the
+  # rest are async so they never delay Codex.
+  jq --arg cmd "$cmd" '
+    def isjoy: ((.command // "") | endswith("codex-hook.sh"));
+    def strip: map(select((any(.hooks[]?; isjoy)) | not));
+    def sync:  {hooks:[{type:"command",command:$cmd,timeout:10}]};
+    def async: {hooks:[{type:"command",command:$cmd,timeout:10,async:true}]};
+    .hooks //= {}
+    | .hooks.SessionStart      = (((.hooks.SessionStart      // []) | strip) + [async])
+    | .hooks.UserPromptSubmit  = (((.hooks.UserPromptSubmit  // []) | strip) + [sync])
+    | .hooks.PostToolUse       = (((.hooks.PostToolUse       // []) | strip) + [async])
+    | .hooks.PermissionRequest = (((.hooks.PermissionRequest // []) | strip) + [async])
+    | .hooks.Stop              = (((.hooks.Stop              // []) | strip) + [async])
+  ' "$CODEX_HOOKS" > "$tmp" || { warn "jq merge failed — skipping Codex hooks"; rm -f "$tmp"; return 0; }
+  mv "$tmp" "$CODEX_HOOKS"
+  ok "5 Codex hooks wired to $cmd"
+}
+
 summary() {
   print
   bold "Joystick is wired up."
@@ -145,6 +180,18 @@ uninstall() {
     ' "$CLAUDE_SETTINGS" > "$tmp" && mv "$tmp" "$CLAUDE_SETTINGS"
     ok "removed Claude hooks from ${CLAUDE_SETTINGS:t}"
   fi
+  if command -v jq >/dev/null 2>&1 && [[ -f $CODEX_HOOKS ]] && jq empty "$CODEX_HOOKS" 2>/dev/null; then
+    backup "$CODEX_HOOKS"
+    tmp=$(mktemp)
+    jq '
+      def isjoy: ((.command // "") | endswith("codex-hook.sh"));
+      def strip: map(select((any(.hooks[]?; isjoy)) | not));
+      if (.hooks|type)=="object" then
+        .hooks |= (with_entries(.value |= strip) | with_entries(select((.value|length) > 0)))
+      else . end
+    ' "$CODEX_HOOKS" > "$tmp" && mv "$tmp" "$CODEX_HOOKS"
+    ok "removed Codex hooks from ${CODEX_HOOKS:t}"
+  fi
   if [[ -d $JOYSTICK_HOME ]]; then
     for s in $ALL; do rm -f "$JOYSTICK_HOME/$s"; done
     rmdir "$JOYSTICK_HOME" 2>/dev/null
@@ -156,7 +203,7 @@ uninstall() {
 }
 
 case ${1:-install} in
-  install)   bold "Joystick installer"; print; install_scripts; install_zshrc; install_hooks; summary ;;
+  install)   bold "Joystick installer"; print; install_scripts; install_zshrc; install_hooks; install_codex_hooks; summary ;;
   uninstall) uninstall ;;
   -h|--help) print -r -- "usage: install.sh [install|uninstall]" ;;
   *)         die "usage: install.sh [install|uninstall]" ;;

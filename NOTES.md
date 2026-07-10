@@ -435,6 +435,37 @@ the whole file — doubling a sub-second cost — and ~5 weeks of in-app history
 beats ~2.5. The keep stays 2000; the archive, not the trigger, is what makes
 the recap whole. Weekly/yesterday recaps are now cheap follow-ups.
 
+## Codex adapter — a second agent kind (2026-07-10)
+First non-Claude agent CLI on the board (the strategy note's "adapter order
+Codex → opencode → Gemini → Copilot"). Codex 0.144 turned out to ship a
+**Claude-compatible hooks engine** — events in `~/.codex/hooks.json` with JSON on
+stdin (`hook_event_name`, `session_id`, `cwd`, `tool_name`/`tool_input`, …), the
+same nested `{hooks:{Event:[{hooks:[…]}]}}` shape as Claude's settings.json. Crucial
+that this is a **separate layer from config.toml's single `notify` slot** (already
+taken here by the desktop app's SkyComputerUseClient) — hooks compose, so we add a
+layer instead of wrapping/clobbering. `notify` alone would've been too thin anyway:
+it only fires on turn-end, so a row could never show "working".
+
+Mapping (`codex-hook.sh`, `kind:"codex"`, `id:"codex-<sid>"`): UserPromptSubmit→start,
+PostToolUse→active, PermissionRequest→waiting, Stop→end, SessionStart(clear/resume/
+compact)→reset. Two things make it *simpler* than the Claude hook: every payload
+carries `model`+`permission_mode` (meta needs no transcript read), and Stop hands us
+`last_assistant_message` directly (no transcript-poll race for the closing blurb).
+
+Viewer: rather than special-case a second kind, generalized the fold's Claude-only
+paths to an **`isAgent` (claude || codex)** notion — session-id grouping, the
+session-rotation retirement, the queued-prompt late-end guard, pid-liveness, the
+tally, and the day digest all now key on isAgent. Codex gets a distinct-but-subtle
+look: its own `codexTeal` accent + the shared thinking-sparkle tinted teal (vs
+Claude's terracotta) so two agent sessions in one repo are legible side by side.
+`codex` joins the interactive-app IGNORE set so the raw TUI process isn't also a
+shell row.
+
+Focused-core scope on purpose: no subagent/bg-shell lines, no ctx% (Codex hooks
+don't report token usage), no auto-title/goal. Those are the "full parity" follow-up
+if the everyday glance proves it's worth it. Tests: codex cases added to
+eventfold-test + daydigest-test, plus a new `codex-hook-test.zsh` emitter harness.
+
 ## Roadmap
 
 ### v0.1 — shareable (1–2 weekends)
@@ -464,7 +495,8 @@ the recap whole. Weekly/yesterday recaps are now cheap follow-ups.
 - [x] Document the event format (EVENTS.md) + `joystick log` CLI for custom
       events — SHIPPED 2026-06-13. (EAS webhook → `joystick log done …` now
       works for --no-wait/cloud builds; viewer keeps external tty=cli events.)
-- [ ] Other agent CLIs: Codex, Gemini
+- [x] Other agent CLIs: **Codex — SHIPPED 2026-07-10** (`codex-hook.sh` +
+      `~/.codex/hooks.json`; focused-core parity, see "Codex adapter" above). Gemini next.
 - [ ] Focus adapters: iTerm2/Terminal.app (AppleScript), tmux switch-client,
       VS Code deep links
 - [ ] Launch: Show HN + 20s screen recording (6 tabs, 3 agents, the inbox)

@@ -53,7 +53,7 @@ Each operation is two events sharing an `id` — a `start` and an `end`.
 | field | meaning |
 |---|---|
 | `v` | schema version (currently `1`); absent on pre-versioning events |
-| `kind` | `shell` / `claude` / `external` — producer type (on `start`). Legacy events omit it; derive from `tty` |
+| `kind` | `shell` / `claude` / `codex` / `external` — producer type (on `start`). Legacy events omit it; derive from `tty`. `claude` and `codex` are both hook-driven AI-agent sessions and share the same event vocabulary + session-scoped grouping (`<agent>-<sid>` id, stable across turns) |
 | `id` | groups start/end; Claude sessions reuse `claude-<sid>` across turns |
 | `cmd` | command line / prompt / op name (**sanitized** — see PRIVACY.md) |
 | `cwd` | working directory (click-to-focus / jump target) |
@@ -74,6 +74,12 @@ Each operation is two events sharing an `id` — a `start` and an `end`.
 
 - **`joystick.zsh`** — local shell commands (`kind: shell`; preexec/precmd hooks).
 - **`claude-hook.sh`** — Claude Code turns (`kind: claude`).
+- **`codex-hook.sh`** — Codex CLI turns (`kind: codex`); wired in `~/.codex/hooks.json`
+  (Codex 0.144+ ships a Claude-compatible hooks engine). Focused-core mapping:
+  `UserPromptSubmit → start`, `PostToolUse → active`, `PermissionRequest → waiting`,
+  `Stop → end` (blurb from `last_assistant_message`), `SessionStart(clear/resume/compact) → reset`,
+  plus a `meta` (model + permission_mode, carried on every payload). No subagent /
+  bg-shell / ctx tracking yet.
 - **`joystick` CLI** — external / CI / webhook events (`kind: external`), below.
 
 ## External events — the `joystick` CLI

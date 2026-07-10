@@ -154,6 +154,22 @@ struct DayDigestTests {
             check("markdown external line", md.contains("- deploy staging ✓ (1m30s)"))
         }
 
+        // 11. a Codex session accumulates as a session just like Claude: turns +
+        //     secs summed, blurb from its closing message, label from the prompt.
+        do {
+            let d = DayDigest.build(events: [
+                ev(#"{"kind":"codex","ev":"start","id":"codex-a","cmd":"» audit the backend","cwd":"/Users/t/core","ts":1100}"#),
+                ev(#"{"ev":"end","id":"codex-a","exit":0,"dur":40,"ts":1140,"msg":"found 3 red flags"}"#),
+                ev(#"{"kind":"codex","ev":"start","id":"codex-a","cmd":"» fix the first one","cwd":"/Users/t/core","ts":1200}"#),
+                ev(#"{"ev":"end","id":"codex-a","exit":0,"dur":20,"ts":1220,"msg":"patched the N+1"}"#),
+            ], dayStart: DAY, now: 2000, home: HOME)
+            let s = d.repos.first?.sessions.first
+            check("codex session recorded", d.repos.first?.name == "core")
+            check("codex turns + secs summed", s?.turns == 2 && s?.secs == 60)
+            check("codex prompt label strips »", s?.label == "audit the backend")
+            check("codex last blurb wins", s?.blurb == "patched the N+1")
+        }
+
         print("pass=\(pass) fail=\(fail)")
         exit(fail == 0 ? 0 : 1)
     }

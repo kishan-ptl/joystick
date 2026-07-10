@@ -231,6 +231,69 @@ struct EventFoldTests {
             check("implausible gap -> unknown dur, not fake success", f.done.last?.dur == nil)
         }
 
+        // --- Codex adapter: a codex session behaves like a claude session ---
+
+        // C1. Codex groups by its session id (like claude), not by surface — robust
+        //     when surface capture missed. A shell op still groups by surface.
+        do {
+            let codex = ev(#"{"kind":"codex","ev":"start","id":"codex-abc","cmd":"» hi","surface":"S","ts":100}"#)
+            var f = EventFold(); f.apply(codex)
+            check("codex groups by session id", f.open["codex-abc"]?.groupKey == "codex-abc")
+            check("codex isAgent, not isClaude", f.open["codex-abc"]?.isAgent == true && f.open["codex-abc"]?.isClaude == false)
+        }
+
+        // C2. Codex turn lifecycle: start -> waiting (PermissionRequest) -> active
+        //     (PostToolUse) -> end carrying last_assistant_message as the blurb.
+        do {
+            var f = EventFold()
+            f.apply(ev(#"{"kind":"codex","ev":"start","id":"codex-x","cmd":"» build it","ts":100}"#))
+            f.apply(ev(#"{"ev":"waiting","id":"codex-x","msg":"wants to run: git push","ts":101}"#))
+            check("codex waiting recorded", f.open["codex-x"]?.isWaiting == true)
+            f.apply(ev(#"{"ev":"active","id":"codex-x","act":"Bash: npm test","ts":102}"#))
+            check("codex active clears waiting", f.open["codex-x"]?.waitingSince == nil && f.open["codex-x"]?.activity == "Bash: npm test")
+            f.apply(ev(#"{"ev":"end","id":"codex-x","exit":0,"dur":5,"ts":105,"msg":"shipped"}"#))
+            check("codex end carries blurb", f.done.last?.summary == "shipped" && f.done.last?.exitCode == 0)
+        }
+
+        // C3. Codex meta (model + mode) attaches by id, like claude.
+        do {
+            var f = EventFold()
+            f.apply(ev(#"{"ev":"meta","id":"codex-x","model":"gpt-5.6-terra","mode":"auto","ts":100}"#))
+            check("codex meta stored", f.meta["codex-x"]?.model == "gpt-5.6-terra" && f.meta["codex-x"]?.mode == "auto")
+        }
+
+        // C4. Session rotation: a new codex start on the SAME pid retires the prior
+        //     codex session's finished row (the /clear analogue).
+        do {
+            var f = EventFold()
+            f.apply(ev(#"{"kind":"codex","ev":"start","id":"codex-old","cmd":"» a","surface":"S","pid":7,"ts":100}"#))
+            f.apply(ev(#"{"ev":"end","id":"codex-old","exit":0,"dur":2,"ts":102}"#))
+            f.apply(ev(#"{"kind":"codex","ev":"start","id":"codex-new","cmd":"» b","surface":"S","pid":7,"ts":110}"#))
+            check("rotated codex session's row retired", !f.done.contains { $0.key == "codex-old" })
+            check("new codex session is open", f.open["codex-new"]?.isRunning == true)
+        }
+
+        // C5. Codex `reset` (clear/resume/compact) retires the prior row by pid.
+        do {
+            var f = EventFold()
+            f.apply(ev(#"{"kind":"codex","ev":"start","id":"codex-old","cmd":"» a","surface":"S","pid":9,"ts":100}"#))
+            f.apply(ev(#"{"ev":"end","id":"codex-old","exit":0,"dur":2,"ts":102}"#))
+            f.apply(ev(#"{"ev":"reset","id":"codex-new","pid":9,"ts":200}"#))
+            check("codex reset retires cleared row", !f.done.contains { $0.key == "codex-old" })
+            check("codex reset opens no op", f.open["codex-new"] == nil)
+        }
+
+        // C6. Queued-prompt late-end guard applies to codex too (turns share one id).
+        do {
+            var f = EventFold()
+            f.apply(ev(#"{"kind":"codex","ev":"start","id":"codex-x","cmd":"» new","ts":200}"#))
+            f.apply(ev(#"{"ev":"end","id":"codex-x","exit":0,"dur":50,"ts":150}"#))  // stale end, turn began at 100
+            check("codex stale end ignored, op stays open", f.open["codex-x"]?.isRunning == true && f.done.isEmpty)
+        }
+
+        // C7. Codex counts toward the daily tally, like claude.
+        check("codex counts toward tally", EventFold.countsTowardTally(ev(#"{"kind":"codex","ev":"start","id":"x","ts":1}"#)))
+
         print("pass=\(pass) fail=\(fail)")
         if fail != 0 { exit(1) }
     }
