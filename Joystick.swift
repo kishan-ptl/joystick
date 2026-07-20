@@ -1429,6 +1429,40 @@ struct WaitingLight: View {
     }
 }
 
+// The turn is done, but work it launched is still running (background shells or
+// subagents that outlive the Stop — see NOTES.md "Background agents"). Neither
+// half of that is the whole truth, so the glyph carries both: the green check
+// stays (your answer IS ready) inside a slowly turning arc in the agent's tint
+// (the session is not idle). The arc is the only moving part, so a row that's
+// merely done reads as still, and a row still chewing reads as alive.
+//
+// Rotation, not a pulse: pulsing is the vocabulary of "needs you" (WaitingLight)
+// and this must never compete with that. Same TimelineView approach as the other
+// two animated glyphs — pauses off-screen, no Timer/@State to leak.
+struct BackgroundRingCheck: View {
+    var tint: Color = .claudeOrange
+    private static let period = 2.4          // seconds per revolution — calm, not a spinner
+    private static let fps = 24.0
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1.0 / Self.fps)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let turn = (t.truncatingRemainder(dividingBy: Self.period)) / Self.period  // 0…1
+            ZStack {
+                Circle()
+                    .trim(from: 0, to: 0.28)     // a quarter-ish arc, so the gap reads as motion
+                    .stroke(tint, style: StrokeStyle(lineWidth: 1.3, lineCap: .round))
+                    .rotationEffect(.degrees(turn * 360))
+                    .frame(width: 15, height: 15)
+                Image(systemName: "checkmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Color.green)
+            }
+            .frame(width: 16, height: 16)   // same fixed box as the other glyphs
+        }
+    }
+}
+
 // "claude-opus-4-8" -> "Opus", etc. for the meta badge.
 func shortModel(_ m: String) -> String {
     let l = m.lowercased()
@@ -1538,6 +1572,17 @@ struct OpRow: View {
     var showJumpSlot = false        // reserve the trailing slot so the time column stays aligned
     var queueEnabled = false        // window rows only — reserve trailing room for the queue chip
 
+    // The turn has closed but work it launched is still going. Everything that
+    // would otherwise render this row as FINISHED keys off this: the glyph gets
+    // its turning ring, the elapsed time keeps a live tint instead of dropping to
+    // grey, and the bg segments are promoted to the front of the subtitle. While
+    // the turn itself is still running the row is already visibly working, so
+    // this stays false and nothing changes.
+    private var hasLiveBg: Bool {
+        !op.isRunning && !(op.bgShells.isEmpty && op.liveSubagents.isEmpty)
+    }
+    private var agentTint: Color { op.isCodex ? .codexTeal : .claudeOrange }
+
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
             Circle()
@@ -1571,7 +1616,11 @@ struct OpRow: View {
                 .font(.system(size: 10, weight: .regular).monospacedDigit())
                 .foregroundStyle(op.isService ? Color.servingGreen
                                  : (op.isRunning && op.isAgent && !op.isWaiting) ? (op.isCodex ? Color.codexTeal : Color.claudeOrange)
-                                 : op.isRunning ? Color.accentColor : .secondary)
+                                 : op.isRunning ? Color.accentColor
+                                 // Turn's done but its bg work isn't: hold the live
+                                 // tint rather than fading to grey, so the whole row
+                                 // (glyph, chip, time) agrees the session isn't idle.
+                                 : hasLiveBg ? agentTint : .secondary)
             // The ⌘1–9 jump keycap used to sit here; removed for now (it crowded the
             // command's trailing edge). The shortcut still works via the key monitor,
             // and the hint footer still documents it. jumpNumber/showJumpSlot are left
@@ -1594,6 +1643,8 @@ struct OpRow: View {
                 AgentThinkingIcon(tint: op.isCodex ? .codexTeal : .claudeOrange)   // twinkling sparkle while a turn is in flight
             } else if op.isRunning {
                 Image(systemName: "play.circle.fill").foregroundStyle(.blue)
+            } else if hasLiveBg, op.exitCode == 0 {
+                BackgroundRingCheck(tint: agentTint)   // done, but bg shells/agents still running
             } else if op.exitCode == 0 {
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
             } else {
@@ -1626,15 +1677,26 @@ struct OpRow: View {
         // Background shells (run_in_background) run alongside whatever the turn is
         // doing and outlive it, so they get their own segment — not part of the
         // status chain above. The actual commands list beneath the row.
-        if !op.bgShells.isEmpty {
-            parts.append(Text("▷ \(op.bgShells.count) shell\(op.bgShells.count == 1 ? "" : "s")"))
-        }
+        //
         // Subagents that outlived the turn: while the turn runs they show inline (⚙)
         // above, but once it's marked done a still-running agent gets its own "⟳ N bg"
         // chip — the row stays truthful that the session is still working (the TUI's
         // "Waiting for N background agents to finish"). Commands list beneath the row.
+        var bg: [Text] = []
+        if !op.bgShells.isEmpty {
+            bg.append(Text("▷ \(op.bgShells.count) shell\(op.bgShells.count == 1 ? "" : "s")"))
+        }
         if !op.isRunning, !op.liveSubagents.isEmpty {
-            parts.append(Text("⟳ \(op.liveSubagents.count) bg"))
+            bg.append(Text("⟳ \(op.liveSubagents.count) bg"))
+        }
+        if hasLiveBg {
+            // Once the turn is done these segments are the ONLY text saying the row
+            // is still live, and this chain is lineLimit(1) — so lift them to the
+            // front where truncation can't reach them and tint them the agent color,
+            // same treatment (and same reasoning) as a hot ctx segment below.
+            for seg in bg.reversed() { parts.insert(seg.foregroundColor(agentTint), at: 0) }
+        } else {
+            parts.append(contentsOf: bg)   // turn still running: the glyph already says "working"
         }
         // Directory: tint the whole path with a warm, desaturated dirTint so it
         // reads as its own thing — easy to scan for "which project" this row is —
