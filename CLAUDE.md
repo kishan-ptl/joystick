@@ -78,9 +78,11 @@ These were decided by using the tool; they define what it is.
    must never trigger "waiting for input?".
 5. **State vocabulary (the whole UI at a glance):** a softly breathing yellow
    light = needs you now (calm pulse, not an alarming blink) · ▶ blue = working ·
-   ◉ green = serving · ✓/✗ = result · blue dot = unseen result (cleared when you
-   view that tab in Ghostty, by any means). The focused Ghostty tab's row also
-   carries a quiet neutral-grey highlight ("you are here").
+   ◉ green = serving · ✓/✗ = result · ✓ inside a slowly turning arc = the turn is
+   done but background shells/subagents it launched are still running (rotation,
+   never a pulse — the pulse belongs to "needs you") · blue dot = unseen result
+   (cleared when you view that tab in Ghostty, by any means). The focused Ghostty
+   tab's row also carries a quiet neutral-grey highlight ("you are here").
 6. **100% local, no network.** The log records every command, so trust is the
    product: plaintext is `chmod 600`, Time-Machine-excluded, redacted at write
    time. Keep it that way.

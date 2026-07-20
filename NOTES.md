@@ -466,6 +466,37 @@ don't report token usage), no auto-title/goal. Those are the "full parity" follo
 if the everyday glance proves it's worth it. Tests: codex cases added to
 eventfold-test + daydigest-test, plus a new `codex-hook-test.zsh` emitter harness.
 
+## "Done" that isn't — the turning ring on a row with live bg work (2026-07-20)
+
+Symptom (reported): a ✓ row reads as finished even while the session is still
+waiting on background shells/subagents. The 2026-06-16 decision above already got
+the substance right — keep the ✓ (your answer IS ready), add a `⟳ N bg` chip — and
+the fold/sort work: bg state is session-scoped, survives the turn's `end`, and
+keeps the group pinned in the **active** section. What was wrong was the WEIGHT.
+`statusIcon` branched purely on `isRunning`/exit code, so the glyph — the thing you
+actually read at a glance — was a flat green check, and the only contradicting
+signal was grey text in a `lineLimit(1)` chain that truncation could eat.
+
+Fix: put the second truth in the glyph instead of the subtitle. `BackgroundRingCheck`
+= the green check inside a slowly turning arc in the agent tint (claudeOrange /
+codexTeal), used when `!isRunning && (bgShells or liveSubagents nonempty)`. The
+elapsed time holds that tint instead of fading to `.secondary`, and the `▷ N shells`
+/ `⟳ N bg` segments get the tint and are lifted to the FRONT of the subtitle chain
+(same promotion, same reason, as a hot ctx segment). So glyph, time and chip agree.
+
+Rotation, deliberately, not a pulse — pulsing is `WaitingLight`'s vocabulary for
+"needs you" and this must never compete with it. It's the only moving part on a
+done row, so "done and still chewing" is distinguishable from "done" in peripheral
+vision. Re-rejected again, for the original reason: flipping the row back to
+"working" would hide that the main answer is ready.
+
+Not covered: the ✗ variant keeps its plain glyph (a red cross already demands a
+look — it never reads as finished-and-fine), though it still gets the promoted
+chip + tinted time. The menubar still counts only `isWaiting`, so a session with
+live bg work is invisible there. Codex can't show any of this — `codex-hook.sh`
+has no bg tracking at all (see the focused-core scope above), so the tint branch
+is dead code for `kind:"codex"` until that lands.
+
 ## Roadmap
 
 ### v0.1 — shareable (1–2 weekends)
