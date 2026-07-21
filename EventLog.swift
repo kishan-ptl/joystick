@@ -44,7 +44,9 @@ struct RawEvent: Decodable {
 // A subagent (Task) running inside a Claude turn. Keyed by the Task's tool_use_id
 // so its start (PreToolUse) and finish (PostToolUse) line up — concurrent
 // subagents each get their own live line instead of fighting over one activity.
-struct LiveChild: Identifiable { let id: String; let label: String }
+// `since` (the start event's ts) lets a stale reap clear a line whose completion
+// signal was lost — see EventFold.reapStaleSubagents.
+struct LiveChild: Identifiable { let id: String; let label: String; let since: Double }
 
 struct Op: Identifiable {
     let key: String
@@ -210,7 +212,7 @@ struct EventFold {
             if let sh = e.shell, !sh.isEmpty {
                 bgShells[e.id, default: []].removeAll { $0.id == sh }
                 if e.subdone != true {
-                    bgShells[e.id, default: []].append(LiveChild(id: sh, label: e.act ?? "shell"))
+                    bgShells[e.id, default: []].append(LiveChild(id: sh, label: e.act ?? "shell", since: e.ts))
                 }
                 break
             }
@@ -221,7 +223,7 @@ struct EventFold {
                 // session is unblocked, so clear any waiting on a still-open op.
                 subagents[e.id, default: []].removeAll { $0.id == sub }
                 if e.subdone != true {
-                    subagents[e.id, default: []].append(LiveChild(id: sub, label: e.act ?? "Task"))
+                    subagents[e.id, default: []].append(LiveChild(id: sub, label: e.act ?? "Task", since: e.ts))
                 }
                 if var op = open[e.id] { op.waitingSince = nil; op.waitingMsg = nil; open[e.id] = op }
                 break
@@ -290,6 +292,34 @@ struct EventFold {
     // unbounded between rotations.
     mutating func pruneOpen(keep: (Op) -> Bool) {
         open = open.filter { keep($0.value) }
+    }
+
+    // Reap subagent (Task) lines whose completion signal was LOST. A subagent
+    // clears only when its completion <task-notification> is observed and emitted
+    // as a `subdone`; that signal can go missing — the emitter's drain scans a
+    // bounded transcript window, and a big turn's early completions scroll out of
+    // it (or the transcript is later trimmed) before any drain sees them. With no
+    // `subdone` the session-scoped line strands and its done row's ⟳ ring spins
+    // until pid death — which for a live Claude session (its pid outlives every
+    // turn) is effectively forever.
+    //
+    // A Task is a bounded OPERATION (seconds-to-minutes), so one still "live" past
+    // a generous bound is a lost signal, not real work — drop it so the ring
+    // clears. Deliberately NOT applied to bgShells: a run_in_background shell is a
+    // SERVICE (dev server) that legitimately runs for hours, so an age-net there
+    // would clip a genuinely-live one (principle #4's operation-vs-service split —
+    // the same reason NOTES rejected an age-net for shells). Time-based, so like
+    // pruneOpen it lives here (called from reload with `now`), not in the pure
+    // event fold in apply().
+    mutating func reapStaleSubagents(now: Double, maxAgeSecs: Double) {
+        // Snapshot the keys — the loop removes keys (= nil) from `subagents`, and
+        // mutating a dictionary while iterating it directly is undefined behavior.
+        for key in Array(subagents.keys) {
+            guard let children = subagents[key] else { continue }
+            let kept = children.filter { now - $0.since < maxAgeSecs }
+            guard kept.count != children.count else { continue }
+            subagents[key] = kept.isEmpty ? nil : kept
+        }
     }
 
     // Forget everything — used on rotation/truncation and on the 4am day rollover,

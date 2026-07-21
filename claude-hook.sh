@@ -113,9 +113,28 @@ drain_finished_bg() {
   setopt local_options nullglob
   local markers=("${LOG:h}/jshell-$sid-"* "${LOG:h}/jagent-$sid-"*)
   (( ${#markers} )) || return 0
-  tail -n 1200 "$1" 2>/dev/null | grep -F '<task-notification>' \
+  # Scan the WHOLE transcript, not a tail window: a big turn's early completions
+  # scroll past a fixed tail before any drain sees them, stranding the line
+  # (measured: one 15-subagent research turn left 4 rings spinning). Marker-gated
+  # above, and the transcript is bounded (Claude rotates/compacts it), so the full
+  # grep -F is cheap in practice. Match ONLY the <task-notification> (written at
+  # completion) — never the tool_result, which for a background Task/shell pairs at
+  # DISPATCH and would drop the line the instant it appeared.
+  grep -F '<task-notification>' "$1" 2>/dev/null \
     | grep -oE 'tool-use-id>toolu_[A-Za-z0-9]+' | sed 's/.*>//' | sort -u \
     | while read -r tuid; do drop_shell "$tuid"; drop_agent "$tuid"; done
+  # Age-out stranded SUBAGENT markers: a Task is a bounded op, so a jagent marker
+  # older than an hour is a lost completion signal (never written, or trimmed out
+  # of the transcript entirely — seen for 2 of those 4 rings). Emit its subdone and
+  # drop the marker so the ring clears, the drain stops re-scanning it every turn,
+  # and the marker leak stops growing. Bg-shell markers are exempt: a
+  # run_in_background service can genuinely run this long (principle #4). Mirrors
+  # the viewer's reapStaleSubagents (same bound) — an active session clears via the
+  # emitter here, an idle one via the viewer.
+  local stale
+  for stale in "${LOG:h}/jagent-$sid-"*(Nmm+60); do
+    drop_agent "${stale##*/jagent-$sid-}"
+  done
 }
 
 # Close this session's open turn (if any) with the given exit code. Decides
@@ -126,6 +145,14 @@ drain_finished_bg() {
 close_turn() {  # $1 = exit code  $2 = notify title  $3 = notify verb
   rm -f "${LOG:h}/waiting-$sid"
   local last start_ts elapsed tpath summary=""
+  # Reconcile finished background work FIRST, before the open-turn gate below.
+  # Stop also fires with no open turn — /clear/resume/compact, and a background
+  # completion that auto-resumed the agent without a fresh prompt (no `start`).
+  # Those still need the drain; gating it behind "has an open turn" was a path by
+  # which a mid-turn completion's ring could strand. Marker-gated, so a Stop with
+  # no bg work in flight pays nothing.
+  tpath=$(claude_transcript)
+  drain_finished_bg "$tpath"
   last=$(tail -n 2000 "$LOG" 2>/dev/null | grep -F "\"id\":\"$id\"" | grep -E '"ev":"(start|end)"' | tail -1)
   [[ $last == *'"ev":"start"'* ]] || return 0
   start_ts=$(jq -r '.ts // 0' <<<"$last")
@@ -142,11 +169,7 @@ close_turn() {  # $1 = exit code  $2 = notify title  $3 = notify verb
   # most want snappy; on a normal Stop, give up blank (omit msg) after ~1.5s if
   # no end_turn shows (a turn that ended on a tool call). Then flatten to one
   # line + redact + cap like every free-text field (< PIPE_BUF, no secrets).
-  tpath=$(claude_transcript)
-  # Drain background work (shells + subagents) that finished during this turn,
-  # including mid-turn completions whose notification never fired its own
-  # UserPromptSubmit drop.
-  drain_finished_bg "$tpath"
+  # (tpath resolved + background work drained above, before the open-turn gate.)
   if [[ $1 == 0 && -n $tpath ]]; then
     local tries=0
     while (( tries < 15 )); do

@@ -118,6 +118,30 @@ struct EventFoldTests {
             check("reset clears bg shells", f.bgShells.isEmpty)
         }
 
+        // 7c. reapStaleSubagents: a subagent (Task) line whose completion signal was
+        //     lost strands forever on a live session (pid never dies). A Task is a
+        //     bounded op, so one alive past the bound is reaped by age. Bg shells are
+        //     EXEMPT — a run_in_background service can genuinely run that long.
+        do {
+            var f = EventFold()
+            f.apply(ev(#"{"kind":"claude","ev":"start","id":"claude-x","cmd":"» go","ts":100}"#))
+            f.apply(ev(#"{"ev":"active","id":"claude-x","act":"Task: old","sub":"tuOld","ts":100}"#))
+            f.apply(ev(#"{"ev":"active","id":"claude-x","act":"Task: new","sub":"tuNew","ts":2800}"#))
+            f.apply(ev(#"{"ev":"active","id":"claude-x","act":"npx dev","shell":"shD","ts":100}"#))
+            // now = 3800: tuOld aged 3700 (> 3600, reaped), tuNew aged 1000 (kept).
+            f.reapStaleSubagents(now: 3800, maxAgeSecs: 3600)
+            check("stale subagent reaped by age", f.subagents["claude-x"]?.map(\.id) == ["tuNew"])
+            check("fresh subagent kept", f.subagents["claude-x"]?.count == 1)
+            check("bg shell exempt from the subagent reap", f.bgShells["claude-x"]?.map(\.id) == ["shD"])
+            // A second session whose subagent is also stale — reaping across MULTIPLE
+            // keys removes keys mid-loop, so the reap must snapshot keys (not iterate
+            // the dict it mutates). Both keys must clear without trapping.
+            f.apply(ev(#"{"kind":"claude","ev":"start","id":"claude-y","cmd":"» go","ts":100}"#))
+            f.apply(ev(#"{"ev":"active","id":"claude-y","act":"Task: y","sub":"tuY","ts":100}"#))
+            f.reapStaleSubagents(now: 9000, maxAgeSecs: 3600)
+            check("both stale keys emptied+cleared", f.subagents["claude-x"] == nil && f.subagents["claude-y"] == nil)
+        }
+
         // 8. meta keyed by claude-<sid>
         do {
             var f = EventFold()
