@@ -104,6 +104,8 @@ final class Store: ObservableObject {
     static let minRunningSecs = 5.0
     static let minDoneSecs = 10.0
     static let doneWindowSecs = 6.0 * 3600
+    static let staleSubagentSecs = 3600.0  // reap a subagent (Task) line whose completion signal was lost:
+                                           // a bounded op still "live" past an hour is a strand, not real work
     static let externalTTL = 24.0 * 3600   // running `joystick log` ops dropped after this with no end
     static let pidReuseMargin = 120.0      // slack for the pid-reuse identity check (alive()); a host that
                                            // started >2min after its op began is a recycled pid, not ours
@@ -444,6 +446,14 @@ final class Store: ObservableObject {
         // stops fold.open growing unbounded between rotations, and keeps a stale id
         // from mis-feeding the Claude late-end merge in EventFold.apply.
         fold.pruneOpen { opHostAlive($0, nowTs: nowTs) }
+
+        // Clear subagent (Task) lines whose completion <task-notification> was
+        // never observed — the emitter's drain can miss it (scrolled out of its
+        // transcript window, or the transcript was trimmed), and with no `subdone`
+        // the line would strand its done row's ⟳ ring forever (a live session's pid
+        // never dies). A Task is a bounded op, so one alive past staleSubagentSecs
+        // is a lost signal; bg shells are exempt (a service can run this long).
+        fold.reapStaleSubagents(now: nowTs, maxAgeSecs: Self.staleSubagentSecs)
 
         // fold.open now holds only live-host ops, so this is just the cosmetic gate:
         // hide ignored interactive apps, and debounce trivial shell noise (a

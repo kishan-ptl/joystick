@@ -102,6 +102,34 @@ fire "$(jq -cn --arg t "$EMPTY" '{hook_event_name:"UserPromptSubmit",session_id:
 check "running child NOT cleared at next prompt" "$(grep '"id":"claude-s13"' "$LOG" | grep '"sub":"toolu_t3"' | grep -c '"subdone":true')" "0"
 check "running child marker survives" "$([[ -e $TMP/joystick/jagent-s13-toolu_t3 ]] && echo yes || echo no)" "yes"
 
+# Widened drain: a completion <task-notification> near the TOP of a big transcript
+# (a mega-turn dispatching many subagents) must still be found. The old tail -n 1200
+# scan missed it once the turn wrote > 1200 lines after it, stranding the ring.
+FIXBIG=$TMP/fixbig.jsonl
+print -r -- '{"type":"user","content":"<task-notification><tool-use-id>toolu_t4</tool-use-id><status>completed</status></task-notification>"}' > "$FIXBIG"
+for i in {1..1500}; do print -r -- '{"type":"assistant","filler":'$i'}'; done >> "$FIXBIG"
+fire '{"hook_event_name":"UserPromptSubmit","session_id":"s14","cwd":"/tmp","prompt":"go"}'
+fire '{"hook_event_name":"PreToolUse","session_id":"s14","cwd":"/tmp","tool_name":"Task","tool_use_id":"toolu_t4","tool_input":{"description":"Early agent"}}'
+fire "$(jq -cn --arg t "$FIXBIG" '{hook_event_name:"UserPromptSubmit",session_id:"s14",cwd:"/tmp",prompt:"next",transcript_path:$t}')"
+check "widened drain finds completion beyond 1200 lines" "$(grep '"id":"claude-s14"' "$LOG" | grep '"sub":"toolu_t4"' | grep -c '"subdone":true')" "1"
+
+# Stale-marker age-GC: a subagent whose completion notification NEVER lands (lost,
+# or trimmed out of the transcript) strands its marker forever. A jagent marker
+# older than an hour is age-reaped at the next drain — subdone emitted, marker
+# removed — so the ring clears and the leak stops. A bg-SHELL marker is exempt (a
+# service can run this long), and a fresh subagent marker is untouched.
+fire '{"hook_event_name":"UserPromptSubmit","session_id":"s15","cwd":"/tmp","prompt":"go"}'
+fire '{"hook_event_name":"PreToolUse","session_id":"s15","cwd":"/tmp","tool_name":"Task","tool_use_id":"toolu_stale","tool_input":{"description":"Lost agent"}}'
+fire '{"hook_event_name":"PreToolUse","session_id":"s15","cwd":"/tmp","tool_name":"Task","tool_use_id":"toolu_fresh","tool_input":{"description":"Live agent"}}'
+fire '{"hook_event_name":"PostToolUse","session_id":"s15","cwd":"/tmp","tool_name":"Bash","tool_use_id":"toolu_svc","tool_input":{"command":"pnpm dev","run_in_background":true}}'
+touch -t "$(date -v-90M +%Y%m%d%H%M 2>/dev/null || date -d '90 min ago' +%Y%m%d%H%M)" "$TMP/joystick/jagent-s15-toolu_stale" "$TMP/joystick/jshell-s15-toolu_svc"
+EMPTY2=$TMP/empty2.jsonl; print -r -- '{"type":"user"}' > "$EMPTY2"
+fire "$(jq -cn --arg t "$EMPTY2" '{hook_event_name:"Stop",session_id:"s15",cwd:"/tmp",transcript_path:$t}')"
+check "stale subagent age-reaped (subdone)" "$(grep '"id":"claude-s15"' "$LOG" | grep '"sub":"toolu_stale"' | grep -c '"subdone":true')" "1"
+check "stale subagent marker removed" "$([[ -e $TMP/joystick/jagent-s15-toolu_stale ]] && echo yes || echo no)" "no"
+check "fresh subagent marker survives GC" "$([[ -e $TMP/joystick/jagent-s15-toolu_fresh ]] && echo yes || echo no)" "yes"
+check "bg-shell marker exempt from GC" "$([[ -e $TMP/joystick/jshell-s15-toolu_svc ]] && echo yes || echo no)" "yes"
+
 # meta event: title / mode / model / ctx extracted from the transcript.
 FIX=$TMP/fix.jsonl
 print -r -- '{"type":"ai-title","aiTitle":"My Topic","sessionId":"s7"}' >> "$FIX"
