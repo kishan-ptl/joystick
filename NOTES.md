@@ -347,12 +347,51 @@ actually landed in the transcript, so a still-running agent keeps its line and t
 outlive-the-turn feature stays intact. Idle completions already wake the session as
 their own prompt (the fast path), so they're covered too.
 
-Residual: a completion `<task-notification>` that is NEVER written would still
-strand a line until pid death — but we've seen no such case (every completion fired
-a notification; the strand was the rm-first bug). If it ever appears, a generous
-liveness/age net is the place to add it. The pre-existing stranded lines clear
-themselves: their session's next prompt re-drains and finds the (already-present)
-notification.
+Residual (was: "we've seen no such case") — RESOLVED 2026-07-21, see below.
+
+## The lost-notification strand DID appear — the stale-subagent reap (2026-07-21)
+
+The residual above ("a completion `<task-notification>` that is NEVER written
+strands a line until pid death") stopped being hypothetical. Found live: one
+`consumer-ethics` session's mega research turn (~15 concurrent subagents +
+hundreds of its own searches) left **4 subagent rings** spinning on a done row.
+Two of the four had no trace left in the transcript at all; the markers
+(`jagent-<sid>-<tuid>`) were still present, so the drain kept re-scanning and
+finding nothing. Two compounding causes:
+1. **Drain window too small.** `drain_finished_bg` scanned only `tail -n 1200` of
+   the transcript. A turn that dispatches many subagents and does its own tool
+   flood writes > 1200 lines *after* an early completion, so that completion's
+   `<task-notification>` scrolls out of the window before any drain sees it — and
+   a later transcript trim/rotate loses it entirely.
+2. **No reconciliation for a truly-lost signal.** Session-scoped children clear
+   ONLY on an observed `subdone`; nothing ever re-checks. A live Claude session's
+   pid never dies, so pid-death / supersede / doneWindow never fire — the ring
+   spins forever.
+
+Fix, layered (the age-net the residual anticipated, but scoped so it doesn't clip
+services — the objection that killed a blanket age-net):
+- **Viewer `EventFold.reapStaleSubagents` (called from `reload`):** drop a
+  subagent line older than a generous bound (1h). A Task is a bounded OPERATION
+  (seconds-to-minutes), so one still "live" past an hour is a lost signal, not
+  work. This is what the earlier age-net rejection was about — but it rejected
+  clipping a `run_in_background` SHELL (a dev-server SERVICE runs for hours).
+  Scoping the reap to subagents and **leaving bgShells exempt** is exactly
+  principle #4's operation-vs-service split, so the objection doesn't apply.
+  Clears the ring even on an idle session (the viewer is the only thing running).
+- **Emitter `drain_finished_bg`:** scan the WHOLE transcript (not `tail -n 1200`)
+  so a completion that landed but scrolled out is still found; and age-out
+  stranded `jagent` markers > 1h (emit their `subdone`, drop the marker) so an
+  active session self-heals via the emitter and the marker leak stops growing.
+- **Emitter `close_turn`:** drain BEFORE the open-turn gate, so a Stop with no
+  open turn (auto-resume without a fresh prompt, `/clear`) still reconciles.
+
+Residual now: a `run_in_background` SHELL whose completion is lost still strands
+(shells are deliberately exempt from the age reap — a service legitimately runs
+for hours, so there's no safe wall-clock bound). Not seen in practice; if it
+appears, the shell needs a liveness signal (a pid/socket check), not an age net.
+Also: markers from long-DEAD sessions are only GC'd by their own session's turns,
+so a dead session's markers leak as harmless 0-byte files — a startup sweep is the
+place to add cleanup if the directory ever grows unwieldy.
 
 ## Cleared-session orphan row — /clear rotates the session id (2026-06-15)
 
