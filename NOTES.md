@@ -536,6 +536,45 @@ live bg work is invisible there. Codex can't show any of this — `codex-hook.sh
 has no bg tracking at all (see the focused-core scope above), so the tint branch
 is dead code for `kind:"codex"` until that lands.
 
+## Notch — top-center preview of the next freed-up agent (2026-07-28)
+
+A borderless, non-activating, always-on-top HUD pill pinned top-center that pops a
+preview the moment the **next** agent session "frees up," and jumps you to its
+Ghostty tab on a press. First ambient slice of the "cockpit" exploration (juggling
+many Claude/Codex sessions) landed on the *existing* board — not the agents-only
+clone. Its whole job is the "didn't notice one needs me" gap the menubar/window
+can't cover while you're heads-down in another tab.
+
+- **"Freed up" = the working → (done OR waiting) edge** (Kishan's call: any stop is
+  "your move"). Detected in `Store.updateNotch()` by diffing a per-reload
+  `notchWorking` set of agent keys against the prior tick — the same seed-then-edge
+  pattern as `notifiedWaiting`. Agents only (`isAgent`); shells/external never pop.
+- **Latest-only, no queue** (Kishan's call): a newer freed session *replaces* the
+  pill; earlier ones fall back to the window/menubar. If this ever feels like it
+  drops something, the fix is a small "+N waiting" affordance — deliberately not
+  built ahead of the need.
+- **Clears via the seen model, never a sticky dismissal** — consistent with
+  principle #1 (mirror, not inbox) and the organic `clearRow`/`markUnread` model.
+  It's suppressed entirely if you're already looking at that tab when it frees, and
+  clears the instant you land on the tab *any* way (click the pill, or switch to it
+  in Ghostty) by watching `focusedSurface`. So `updateNotch()` runs at the end of
+  every `reload()` AND on each focus change in `pollFocusedSurface` (the latter so
+  it clears promptly even when nothing's running to trigger a reload).
+- **Reuses the one focus entry point** — a tap calls `Store.focus(op)` (stamps
+  `seenAt`, runs `joystick-focus.sh` by surface id / cwd), so click-to-focus is the
+  exact same path as a row click. No new interaction surface, no new dismissal state.
+- **Panel**: `NSPanel([.nonactivatingPanel, .borderless])`, `.statusBar` level,
+  `collectionBehavior` = canJoinAllSpaces + fullScreenAuxiliary + stationary, placed
+  at `visibleFrame` top-center (just under the menubar). `NotchHostingView` overrides
+  `acceptsFirstMouse` so a single click focuses without a focus bounce. Committed
+  dark HUD glass (`.hudWindow` material) — one look, legible over any wallpaper.
+- **State is imperative, not `@Published`** — `notchWorking`/`notchPreview` are plain
+  vars and a `NotchController` owns the panel; the notch is driven from the Store's
+  live heartbeat, never rendered inside the SwiftUI window (no per-tick churn).
+- **Codex works too** — its `PermissionRequest → waiting` and `Stop → end` give both
+  edges, so a freed Codex turn pops the same pill. Residual: a surfaceless session
+  can't auto-clear-by-visit (no `focusedSurface` match) — it clears on click; rare.
+
 ## Roadmap
 
 ### v0.1 — shareable (1–2 weekends)

@@ -120,6 +120,15 @@ final class Store: ObservableObject {
     private var ttyStates: [String: TtyState] = [:]
     private var lastStallCheck = Date.distantPast
     private var notifiedWaiting: Set<String> = []
+    // --- Notch: a top-center HUD that surfaces the LATEST agent session to "free
+    // up" (finish its turn or block waiting on you) and jumps you to its tab on a
+    // press. notchWorking = agent keys seen in the working phase last reload, so we
+    // fire only on the working -> freed EDGE. notchPreview = the one session shown
+    // (latest-only). Plain vars, not @Published: the notch is driven imperatively
+    // through the controller, never rendered inside the SwiftUI window.
+    private var notchWorking: Set<String> = []
+    private var notchPreview: NotchPreview? = nil
+    private let notch = NotchController()
     // First-seen order of group keys, preserved across reloads (new keys
     // appended, vanished keys removed) — the stable slots for orderedGroups.
     private var slotOrder: [String] = []
@@ -656,6 +665,8 @@ final class Store: ObservableObject {
         // FS watch alone wakes it when the next event lands.
         let liveOpen = fold.open.values.contains { opHostAlive($0, nowTs: nowTs) }
         updateActiveTick(liveOpen)
+
+        updateNotch()
     }
 
     // MARK: - Event-driven refresh
@@ -724,6 +735,49 @@ final class Store: ObservableObject {
         p.executableURL = URL(fileURLWithPath: "/bin/zsh")
         p.arguments = [Self.focusScript, op.surface.isEmpty ? "-" : op.surface, op.cwd]
         try? p.run()
+    }
+
+    // Drive the top-center notch. "Freed" = a Claude/Codex session that was working
+    // last tick and has now stopped — finished its turn OR blocked waiting on you
+    // (both mean "your move"). Latest-only: a newer freed session replaces the
+    // preview. It clears the moment you land on that tab (any way), reusing
+    // focusedSurface — never a sticky dismissal — and never pops if you're already
+    // sitting in that tab when it frees. Called at the end of every reload and on
+    // each focus change; both run on the main thread.
+    private func updateNotch() {
+        let agents = (activeGroups + idleGroups).filter { $0.current.isAgent }
+        var working: Set<String> = []
+        for g in agents {
+            if g.current.isRunning && !g.current.isWaiting { working.insert(g.key); continue }
+            // g is freed (done or waiting). Fire only on the working -> freed edge,
+            // and only if you're not already looking at that tab.
+            if notchWorking.contains(g.key),
+               g.current.surface.isEmpty || g.current.surface != focusedSurface {
+                notchPreview = NotchPreview(g)          // latest-only replace
+            }
+        }
+        notchWorking = working
+
+        // Clear once you've landed on the tab, the session went back to work, or
+        // its row is gone (surface closed — the mirror principle).
+        if let p = notchPreview {
+            let g = agents.first { $0.key == p.key }
+            let visited = !p.surface.isEmpty && p.surface == focusedSurface
+            let backToWork = g.map { $0.current.isRunning && !$0.current.isWaiting } ?? false
+            if g == nil || visited || backToWork { notchPreview = nil }
+        }
+
+        if let p = notchPreview {
+            notch.show(p) { [weak self] in self?.focusFromNotch(p) }
+        } else {
+            notch.hide()
+        }
+    }
+
+    private func focusFromNotch(_ p: NotchPreview) {
+        focus(p.op)              // the one focus entry point — stamps seen, runs the script
+        notchPreview = nil
+        notch.hide()
     }
 
     // Manually re-flag a finished row as unread (right-click → "Mark unread").
@@ -1238,6 +1292,10 @@ final class Store: ObservableObject {
                     self.lastPersistedFocus = id
                     self.focusedSurface = id
                     self.persistSeen()
+                    // Clear the notch the instant you land on that tab (your
+                    // dismissal is "I went there"), even when nothing is running to
+                    // otherwise trigger a reload.
+                    self.updateNotch()
                 }
             }
         }
@@ -3105,6 +3163,178 @@ struct VisualEffectBackground: NSViewRepresentable {
     func updateNSView(_ v: NSVisualEffectView, context: Context) {
         v.material = material
         v.blendingMode = blending
+    }
+}
+
+// MARK: - Notch (top-center HUD)
+
+// A value snapshot of the freed-up session shown in the notch — decoupled from the
+// live fold, and Equatable so the controller skips redundant redraws while the same
+// session sits unacknowledged.
+struct NotchPreview: Equatable {
+    let key: String
+    let surface: String
+    let name: String
+    let blurb: String
+    let waiting: Bool      // needs-you (permission/question) vs. a finished turn
+    let failed: Bool       // finished non-zero
+    let op: Op             // for focus() on tap
+
+    init(_ g: SurfaceGroup) {
+        let o = g.current
+        key = g.key
+        surface = o.surface
+        let picked = !o.sessionName.isEmpty ? o.sessionName
+                   : !o.goal.isEmpty ? o.goal
+                   : !o.title.isEmpty ? o.title
+                   : (o.cwd as NSString).lastPathComponent
+        name = picked.isEmpty ? (o.isCodex ? "Codex" : "Claude") : picked
+        waiting = o.isWaiting
+        failed = !o.isRunning && (o.exitCode ?? 0) != 0
+        if o.isWaiting {
+            blurb = (o.waitingMsg?.isEmpty == false) ? o.waitingMsg! : "waiting for you"
+        } else if let s = o.summary, !s.isEmpty {
+            blurb = s
+        } else {
+            blurb = (!o.isRunning && (o.exitCode ?? 0) != 0) ? "finished with errors" : "done"
+        }
+        op = o
+    }
+
+    static func == (a: NotchPreview, b: NotchPreview) -> Bool {
+        a.key == b.key && a.waiting == b.waiting && a.failed == b.failed
+            && a.name == b.name && a.blurb == b.blurb
+    }
+}
+
+// The observable the notch's SwiftUI view binds to; the controller swaps `preview`
+// and `onTap` as sessions free up.
+final class NotchModel: ObservableObject {
+    @Published var preview: NotchPreview? = nil
+    var onTap: () -> Void = {}
+}
+
+// The pill itself: a compact frosted-glass capsule — state glyph, session name, and
+// the last thing it said — that focuses the tab on a click.
+struct NotchView: View {
+    @ObservedObject var model: NotchModel
+
+    var body: some View {
+        if let p = model.preview {
+            HStack(spacing: 10) {
+                Image(systemName: glyph(p).name)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(glyph(p).color)
+                    .frame(width: 16)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(p.name)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Text(p.blurb)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.62))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                Image(systemName: "arrow.right.circle.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.32))
+            }
+            .padding(.horizontal, 13)
+            .padding(.vertical, 9)
+            .frame(width: 336, alignment: .leading)
+            .background(VisualEffectBackground(material: .hudWindow, blending: .behindWindow))
+            .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .onTapGesture { model.onTap() }
+            .help("Jump to \(p.name) in Ghostty")
+        }
+    }
+
+    private func glyph(_ p: NotchPreview) -> (name: String, color: Color) {
+        if p.waiting { return ("hand.raised.fill", Color.summaryYellow) }
+        if p.failed  { return ("xmark.circle.fill", Color(red: 0.86, green: 0.30, blue: 0.27)) }
+        return ("checkmark.circle.fill", Color.servingGreen)
+    }
+}
+
+// NSHostingView that accepts the first click even while the app is inactive, so a
+// single tap on the always-on-top panel focuses the tab without a focus bounce.
+final class NotchHostingView: NSHostingView<NotchView> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    required init(rootView: NotchView) { super.init(rootView: rootView) }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+}
+
+// Owns the borderless, non-activating, always-on-top panel pinned top-center. The
+// Store pokes it with show/hide; it never reaches back into app state. Lazily makes
+// the panel on first show, so nothing appears at launch until a session frees up.
+final class NotchController {
+    private var panel: NSPanel?
+    private let model = NotchModel()
+    private var current: NotchPreview?
+
+    func show(_ p: NotchPreview, onTap: @escaping () -> Void) {
+        model.onTap = onTap
+        let wasVisible = panel?.isVisible == true
+        if current == p, wasVisible { return }   // same session already up — no redraw
+        current = p
+        model.preview = p
+        ensurePanel()
+        position()
+        if !wasVisible { fadeIn() }
+    }
+
+    func hide() {
+        current = nil
+        guard let panel, panel.isVisible else { return }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.15
+            panel.animator().alphaValue = 0
+        }, completionHandler: { [weak panel] in panel?.orderOut(nil) })
+    }
+
+    private func ensurePanel() {
+        if panel != nil { return }
+        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 336, height: 52),
+                        styleMask: [.nonactivatingPanel, .borderless],
+                        backing: .buffered, defer: false)
+        p.isFloatingPanel = true
+        p.level = .statusBar
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        p.backgroundColor = .clear
+        p.isOpaque = false
+        p.hasShadow = true
+        p.hidesOnDeactivate = false
+        p.isMovableByWindowBackground = false
+        p.becomesKeyOnlyIfNeeded = true
+        p.contentView = NotchHostingView(rootView: NotchView(model: model))
+        panel = p
+    }
+
+    private func position() {
+        guard let panel, let host = panel.contentView, let screen = NSScreen.main else { return }
+        host.layoutSubtreeIfNeeded()
+        let size = host.fittingSize
+        let w = size.width  > 1 ? size.width  : 336
+        let h = size.height > 1 ? size.height : 52
+        let vf = screen.visibleFrame
+        panel.setFrame(NSRect(x: vf.midX - w / 2, y: vf.maxY - h - 6, width: w, height: h), display: true)
+    }
+
+    private func fadeIn() {
+        guard let panel else { return }
+        panel.alphaValue = 0
+        panel.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.18
+            panel.animator().alphaValue = 1
+        }
     }
 }
 
