@@ -120,15 +120,14 @@ final class Store: ObservableObject {
     private var ttyStates: [String: TtyState] = [:]
     private var lastStallCheck = Date.distantPast
     private var notifiedWaiting: Set<String> = []
-    // --- Notch: a top-center HUD that surfaces the LATEST agent session to "free
-    // up" (finish its turn or block waiting on you) and jumps you to its tab on a
-    // press. notchWorking = agent keys seen in the working phase last reload, so we
-    // fire only on the working -> freed EDGE. notchPreview = the one session shown
-    // (latest-only). Plain vars, not @Published: the notch is driven imperatively
-    // through the controller, never rendered inside the SwiftUI window.
-    private var notchWorking: Set<String> = []
-    private var notchPreview: NotchPreview? = nil
-    private let notch = NotchController()
+    // --- Session strip: a top-center HUD laying out one frosted pill per in-flight
+    // agent session — actively working, blocked needing you, or freed-but-not-yet-
+    // visited — stable-ordered to match the window's slots. It is PURELY derived from
+    // orderedGroups + focusedSurface + the seen model on each reload (no working->freed
+    // edge state to keep), and self-prunes: a pill drops the moment you land on its tab
+    // or its surface closes. Driven imperatively through the controller, never rendered
+    // inside the SwiftUI window. See updateSessionStrip().
+    private let strip = SessionStripController()
     // First-seen order of group keys, preserved across reloads (new keys
     // appended, vanished keys removed) — the stable slots for orderedGroups.
     private var slotOrder: [String] = []
@@ -666,7 +665,7 @@ final class Store: ObservableObject {
         let liveOpen = fold.open.values.contains { opHostAlive($0, nowTs: nowTs) }
         updateActiveTick(liveOpen)
 
-        updateNotch()
+        updateSessionStrip()
     }
 
     // MARK: - Event-driven refresh
@@ -737,47 +736,48 @@ final class Store: ObservableObject {
         try? p.run()
     }
 
-    // Drive the top-center notch. "Freed" = a Claude/Codex session that was working
-    // last tick and has now stopped — finished its turn OR blocked waiting on you
-    // (both mean "your move"). Latest-only: a newer freed session replaces the
-    // preview. It clears the moment you land on that tab (any way), reusing
-    // focusedSurface — never a sticky dismissal — and never pops if you're already
-    // sitting in that tab when it frees. Called at the end of every reload and on
-    // each focus change; both run on the main thread.
-    private func updateNotch() {
-        let agents = (activeGroups + idleGroups).filter { $0.current.isAgent }
-        var working: Set<String> = []
-        for g in agents {
-            if g.current.isRunning && !g.current.isWaiting { working.insert(g.key); continue }
-            // g is freed (done or waiting). Fire only on the working -> freed edge,
-            // and only if you're not already looking at that tab.
-            if notchWorking.contains(g.key),
-               g.current.surface.isEmpty || g.current.surface != focusedSurface {
-                notchPreview = NotchPreview(g)          // latest-only replace
+    // Drive the top-center session strip. Membership is derived fresh every call
+    // (no edge state): a session surfaces only once it STOPS working and it's your
+    // move — each agent group whose tab you're NOT currently sitting in earns a pill iff it is
+    //   · waiting  (blocked, needs your move), or
+    //   · freed & unseen (finished but not yet jumped to — the seen model).
+    // A still-grinding session is deliberately absent (that churn is distracting); it
+    // appears when it's done. Idle-and-already-seen sessions drop off. Order is the
+    // window's own slot order (orderedGroups), so a pill sits where its row sits. Cap
+    // by how many fit across the screen; the rest fold into a "+k" pill that summons
+    // the window. Called at the end of every reload and on each focus change (main-thread).
+    private func updateSessionStrip() {
+        let focused = focusedSurface ?? ""
+        var pills: [SessionPreview] = []
+        for g in orderedGroups where g.current.isAgent {
+            let o = g.current
+            // The tab you're already in isn't on the strip — you're there.
+            if !focused.isEmpty && o.surface == focused { continue }
+            if o.isWaiting || o.unseen {
+                pills.append(SessionPreview(g))
             }
         }
-        notchWorking = working
 
-        // Clear once you've landed on the tab, the session went back to work, or
-        // its row is gone (surface closed — the mirror principle).
-        if let p = notchPreview {
-            let g = agents.first { $0.key == p.key }
-            let visited = !p.surface.isEmpty && p.surface == focusedSurface
-            let backToWork = g.map { $0.current.isRunning && !$0.current.isWaiting } ?? false
-            if g == nil || visited || backToWork { notchPreview = nil }
-        }
+        if pills.isEmpty { strip.hide(); return }
 
-        if let p = notchPreview {
-            notch.show(p) { [weak self] in self?.focusFromNotch(p) }
-        } else {
-            notch.hide()
-        }
+        // How many whole pills fit across the usable width (leave a margin); the
+        // overflow collapses into one trailing "+k" pill.
+        let screenW = NSScreen.main?.visibleFrame.width ?? 1440
+        let cap = max(2, Int((screenW - 80) / 250))
+        let overflow = max(0, pills.count - cap)
+        let shown = Array(pills.prefix(cap))
+        strip.show(shown, overflow: overflow,
+                   onTap: { [weak self] p in self?.focusFromStrip(p) },
+                   onOverflow: { Summoner.shared.summon() })
     }
 
-    private func focusFromNotch(_ p: NotchPreview) {
+    private func focusFromStrip(_ p: SessionPreview) {
         focus(p.op)              // the one focus entry point — stamps seen, runs the script
-        notchPreview = nil
-        notch.hide()
+        // Optimistically prune the tapped pill: focus() already stamped seenAt (so a
+        // freed pill's `unseen` is gone), and marking us "here" drops a working/waiting
+        // pill too, before the ~2s focus poll confirms it.
+        if !p.surface.isEmpty { focusedSurface = p.surface }
+        updateSessionStrip()
     }
 
     // Manually re-flag a finished row as unread (right-click → "Mark unread").
@@ -1292,10 +1292,10 @@ final class Store: ObservableObject {
                     self.lastPersistedFocus = id
                     self.focusedSurface = id
                     self.persistSeen()
-                    // Clear the notch the instant you land on that tab (your
+                    // Drop that tab's pill the instant you land on it (your
                     // dismissal is "I went there"), even when nothing is running to
                     // otherwise trigger a reload.
-                    self.updateNotch()
+                    self.updateSessionStrip()
                 }
             }
         }
@@ -2854,9 +2854,17 @@ struct MenuBarLabel: View {
 
     var body: some View {
         let waiting = store.activeGroups.filter { $0.current.isWaiting }.count
+        // Agent sessions actively grinding (running, not blocked). They no longer
+        // clutter the strip, so their tally lives here as a calm background glance.
+        let working = store.activeGroups.filter { $0.current.isAgent && !$0.current.isWaiting }.count
         if waiting > 0 {
+            // Needs-you always wins the icon — the gold alarm, the count is who's blocked.
             Label("\(waiting)", systemImage: "hand.raised.fill")
                 .foregroundStyle(Color.summaryYellow)   // the #DCC98F app-icon gold
+        } else if working > 0 {
+            // N agents working: the joystick + a plain count in the menubar's own tint
+            // (gold stays reserved for "needs you"), so it reads as status, not alarm.
+            Label("\(working)", systemImage: "gamecontroller")
         } else {
             Image(systemName: "gamecontroller")
         }
@@ -3166,19 +3174,37 @@ struct VisualEffectBackground: NSViewRepresentable {
     }
 }
 
-// MARK: - Notch (top-center HUD)
+// MARK: - Session strip (top-center HUD)
 
-// A value snapshot of the freed-up session shown in the notch — decoupled from the
-// live fold, and Equatable so the controller skips redundant redraws while the same
-// session sits unacknowledged.
-struct NotchPreview: Equatable {
+// Shared geometry for the strip so the SwiftUI pills and the panel that sizes itself
+// around them stay in lockstep — the controller computes its window frame from these
+// deterministically rather than round-tripping through fittingSize.
+enum StripMetrics {
+    static let pillW: CGFloat = 234
+    static let pillH: CGFloat = 46
+    static let overflowW: CGFloat = 52
+    static let gap: CGFloat = 8
+    static let corner: CGFloat = 14
+    static let topGap: CGFloat = 6   // clearance below the menubar
+}
+
+// A value snapshot of one agent session shown as a pill — decoupled from the live
+// fold, and Equatable so the controller skips redundant redraws while the same set
+// of sessions sits in the same state.
+struct SessionPreview: Equatable, Identifiable {
     let key: String
     let surface: String
     let name: String
     let blurb: String
-    let waiting: Bool      // needs-you (permission/question) vs. a finished turn
+    let worktree: String   // linked-worktree leaf ("" for the main checkout)
+    let dir: String        // cwd's directory name — the "where" when not a worktree
+    let isCodex: Bool       // agent kind, for the working sparkle's tint
+    let working: Bool      // running, not blocked
+    let waiting: Bool      // blocked, your move
     let failed: Bool       // finished non-zero
     let op: Op             // for focus() on tap
+
+    var id: String { key }
 
     init(_ g: SurfaceGroup) {
         let o = g.current
@@ -3189,109 +3215,214 @@ struct NotchPreview: Equatable {
                    : !o.title.isEmpty ? o.title
                    : (o.cwd as NSString).lastPathComponent
         name = picked.isEmpty ? (o.isCodex ? "Codex" : "Claude") : picked
+        worktree = o.worktree
+        dir = (o.cwd as NSString).lastPathComponent
+        isCodex = o.isCodex
+        working = o.isRunning && !o.isWaiting
         waiting = o.isWaiting
         failed = !o.isRunning && (o.exitCode ?? 0) != 0
         if o.isWaiting {
             blurb = (o.waitingMsg?.isEmpty == false) ? o.waitingMsg! : "waiting for you"
+        } else if o.isRunning {
+            // Working: the goal (if set and not already the name) is the richest
+            // "what is this doing" — otherwise a plain live marker.
+            blurb = (!o.goal.isEmpty && o.goal != picked) ? o.goal : "working…"
         } else if let s = o.summary, !s.isEmpty {
             blurb = s
         } else {
-            blurb = (!o.isRunning && (o.exitCode ?? 0) != 0) ? "finished with errors" : "done"
+            blurb = (o.exitCode ?? 0) != 0 ? "finished with errors" : "done"
         }
         op = o
     }
 
-    static func == (a: NotchPreview, b: NotchPreview) -> Bool {
-        a.key == b.key && a.waiting == b.waiting && a.failed == b.failed
-            && a.name == b.name && a.blurb == b.blurb
+    static func == (a: SessionPreview, b: SessionPreview) -> Bool {
+        a.key == b.key && a.working == b.working && a.waiting == b.waiting
+            && a.failed == b.failed && a.name == b.name && a.blurb == b.blurb
+            && a.worktree == b.worktree && a.dir == b.dir
     }
 }
 
-// The observable the notch's SwiftUI view binds to; the controller swaps `preview`
-// and `onTap` as sessions free up.
-final class NotchModel: ObservableObject {
-    @Published var preview: NotchPreview? = nil
-    var onTap: () -> Void = {}
+// The observable the strip's SwiftUI view binds to; the controller swaps the pill
+// list + the tap handlers as the fleet changes.
+final class StripModel: ObservableObject {
+    @Published var previews: [SessionPreview] = []
+    @Published var overflow: Int = 0
+    var onTap: (SessionPreview) -> Void = { _ in }
+    var onOverflow: () -> Void = {}
 }
 
-// The pill itself: a compact frosted-glass capsule — state glyph, session name, and
-// the last thing it said — that focuses the tab on a click.
-struct NotchView: View {
-    @ObservedObject var model: NotchModel
+// A folder chip — the session's directory name, shown as the "where" on pills NOT in
+// a linked worktree (those show the WorktreeChip). Same quiet grey capsule as the
+// worktree chip, a folder glyph instead of the branch so the two "wheres" read apart.
+struct DirChip: View {
+    let name: String
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "folder")
+                .font(.system(size: 8, weight: .semibold))
+            Text(name)
+                .font(.caption2.weight(.semibold))
+                .lineLimit(1)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Color.secondary.opacity(0.12), in: Capsule())
+        .overlay(Capsule().strokeBorder(Color.secondary.opacity(0.3), lineWidth: 0.5))
+        .help(name)
+    }
+}
+
+// One frosted capsule per in-flight session: the state glyph (reusing the row's own
+// vocabulary — breathing gold = needs you, the agent sparkle = working, ✓/✗ = result),
+// the session name + a "where" chip (worktree branch, else directory), and the last
+// thing it said. A click focuses the tab.
+struct SessionPill: View {
+    let p: SessionPreview
+    let onTap: () -> Void
+
+    // Border accent per state — the glyph carries the motion, this is a quiet tint.
+    private var accent: Color {
+        if p.waiting { return Color(hex: 0xFFC107) }
+        if p.working { return p.isCodex ? .codexTeal : .claudeOrange }
+        if p.failed  { return Color(red: 0.86, green: 0.30, blue: 0.27) }
+        return .servingGreen
+    }
+
+    @ViewBuilder private var glyph: some View {
+        if p.waiting {
+            WaitingLight()                                        // soft gold breathing = needs you
+        } else if p.working {
+            AgentThinkingIcon(tint: p.isCodex ? .codexTeal : .claudeOrange)  // twinkling sparkle = working
+        } else if p.failed {
+            Image(systemName: "xmark.circle.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color(red: 0.86, green: 0.30, blue: 0.27))
+                .frame(width: 16, height: 16)
+        } else {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.servingGreen)
+                .frame(width: 16, height: 16)
+        }
+    }
 
     var body: some View {
-        if let p = model.preview {
-            HStack(spacing: 10) {
-                Image(systemName: glyph(p).name)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(glyph(p).color)
-                    .frame(width: 16)
-                VStack(alignment: .leading, spacing: 1) {
+        HStack(spacing: 9) {
+            glyph
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
                     Text(p.name)
                         .font(.system(size: 12.5, weight: .semibold))
                         .foregroundStyle(.white)
                         .lineLimit(1)
-                    Text(p.blurb)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.62))
-                        .lineLimit(1)
+                    if !p.worktree.isEmpty {
+                        WorktreeChip(name: p.worktree)
+                    } else if !p.dir.isEmpty {
+                        DirChip(name: p.dir)
+                    }
                 }
-                Spacer(minLength: 6)
-                Image(systemName: "arrow.right.circle.fill")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.white.opacity(0.32))
+                Text(p.blurb)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.62))
+                    .lineLimit(1)
             }
-            .padding(.horizontal, 13)
-            .padding(.vertical, 9)
-            .frame(width: 336, alignment: .leading)
-            .background(VisualEffectBackground(material: .hudWindow, blending: .behindWindow))
-            .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 15, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-            .onTapGesture { model.onTap() }
-            .help("Jump to \(p.name) in Ghostty")
+            Spacer(minLength: 0)
         }
+        .padding(.horizontal, 12)
+        .frame(width: StripMetrics.pillW, height: StripMetrics.pillH, alignment: .leading)
+        .background(VisualEffectBackground(material: .hudWindow, blending: .behindWindow))
+        .clipShape(RoundedRectangle(cornerRadius: StripMetrics.corner, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: StripMetrics.corner, style: .continuous)
+                .strokeBorder(accent.opacity(p.waiting ? 0.5 : 0.16), lineWidth: 1)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: StripMetrics.corner, style: .continuous))
+        .onTapGesture { onTap() }
+        .help("Jump to \(p.name) in Ghostty")
     }
+}
 
-    private func glyph(_ p: NotchPreview) -> (name: String, color: Color) {
-        if p.waiting { return ("hand.raised.fill", Color.summaryYellow) }
-        if p.failed  { return ("xmark.circle.fill", Color(red: 0.86, green: 0.30, blue: 0.27)) }
-        return ("checkmark.circle.fill", Color.servingGreen)
+// The trailing "+k" pill when more sessions are in flight than fit across the screen;
+// a click summons the full window where the rest live.
+struct OverflowPill: View {
+    let count: Int
+    let onTap: () -> Void
+    var body: some View {
+        Text("+\(count)")
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.82))
+            .frame(width: StripMetrics.overflowW, height: StripMetrics.pillH)
+            .background(VisualEffectBackground(material: .hudWindow, blending: .behindWindow))
+            .clipShape(RoundedRectangle(cornerRadius: StripMetrics.corner, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: StripMetrics.corner, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: StripMetrics.corner, style: .continuous))
+            .onTapGesture { onTap() }
+            .help("\(count) more — open Joystick")
+    }
+}
+
+// The strip: pills laid left-to-right, evenly spaced, over a clear panel (the gaps
+// show the desktop through). Forced dark so the reused grey chips read on the HUD.
+struct SessionStripView: View {
+    @ObservedObject var model: StripModel
+
+    var body: some View {
+        HStack(spacing: StripMetrics.gap) {
+            ForEach(model.previews) { p in
+                SessionPill(p: p) { model.onTap(p) }
+            }
+            if model.overflow > 0 {
+                OverflowPill(count: model.overflow) { model.onOverflow() }
+            }
+        }
+        .environment(\.colorScheme, .dark)
+        .fixedSize()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
 // NSHostingView that accepts the first click even while the app is inactive, so a
 // single tap on the always-on-top panel focuses the tab without a focus bounce.
-final class NotchHostingView: NSHostingView<NotchView> {
+final class StripHostingView: NSHostingView<SessionStripView> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    required init(rootView: NotchView) { super.init(rootView: rootView) }
+    required init(rootView: SessionStripView) { super.init(rootView: rootView) }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 }
 
 // Owns the borderless, non-activating, always-on-top panel pinned top-center. The
 // Store pokes it with show/hide; it never reaches back into app state. Lazily makes
-// the panel on first show, so nothing appears at launch until a session frees up.
-final class NotchController {
+// the panel on first show, so nothing appears at launch until a session is in flight.
+// The window frame is computed from StripMetrics + the pill count (deterministic, so
+// it resizes cleanly on the frame the count changes — no fittingSize round-trip).
+final class SessionStripController {
     private var panel: NSPanel?
-    private let model = NotchModel()
-    private var current: NotchPreview?
+    private let model = StripModel()
+    private var current: [SessionPreview] = []
+    private var currentOverflow = -1
 
-    func show(_ p: NotchPreview, onTap: @escaping () -> Void) {
+    func show(_ previews: [SessionPreview], overflow: Int,
+              onTap: @escaping (SessionPreview) -> Void,
+              onOverflow: @escaping () -> Void) {
         model.onTap = onTap
+        model.onOverflow = onOverflow
         let wasVisible = panel?.isVisible == true
-        if current == p, wasVisible { return }   // same session already up — no redraw
-        current = p
-        model.preview = p
+        if current == previews, currentOverflow == overflow, wasVisible { return }  // no change — skip redraw
+        current = previews
+        currentOverflow = overflow
+        model.previews = previews
+        model.overflow = overflow
         ensurePanel()
         position()
         if !wasVisible { fadeIn() }
     }
 
     func hide() {
-        current = nil
+        current = []
+        currentOverflow = -1
         guard let panel, panel.isVisible else { return }
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.15
@@ -3301,7 +3432,7 @@ final class NotchController {
 
     private func ensurePanel() {
         if panel != nil { return }
-        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 336, height: 52),
+        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: StripMetrics.pillW, height: StripMetrics.pillH),
                         styleMask: [.nonactivatingPanel, .borderless],
                         backing: .buffered, defer: false)
         p.isFloatingPanel = true
@@ -3313,18 +3444,22 @@ final class NotchController {
         p.hidesOnDeactivate = false
         p.isMovableByWindowBackground = false
         p.becomesKeyOnlyIfNeeded = true
-        p.contentView = NotchHostingView(rootView: NotchView(model: model))
+        let host = StripHostingView(rootView: SessionStripView(model: model))
+        host.autoresizingMask = [.width, .height]
+        p.contentView = host
         panel = p
     }
 
     private func position() {
-        guard let panel, let host = panel.contentView, let screen = NSScreen.main else { return }
-        host.layoutSubtreeIfNeeded()
-        let size = host.fittingSize
-        let w = size.width  > 1 ? size.width  : 336
-        let h = size.height > 1 ? size.height : 52
+        guard let panel, let screen = NSScreen.main else { return }
+        let n = model.previews.count
+        var w = CGFloat(n) * StripMetrics.pillW + CGFloat(max(0, n - 1)) * StripMetrics.gap
+        if model.overflow > 0 { w += StripMetrics.gap + StripMetrics.overflowW }
+        let h = StripMetrics.pillH
         let vf = screen.visibleFrame
-        panel.setFrame(NSRect(x: vf.midX - w / 2, y: vf.maxY - h - 6, width: w, height: h), display: true)
+        panel.setFrame(NSRect(x: vf.midX - w / 2, y: vf.maxY - h - StripMetrics.topGap, width: w, height: h),
+                       display: true)
+        panel.invalidateShadow()   // per-pill shadows follow the alpha shape — refresh on resize
     }
 
     private func fadeIn() {
