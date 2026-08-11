@@ -575,6 +575,59 @@ can't cover while you're heads-down in another tab.
   edges, so a freed Codex turn pops the same pill. Residual: a surfaceless session
   can't auto-clear-by-visit (no `focusedSurface` match) — it clears on click; rare.
 
+## The orphaned pill — an agent that outlived its terminal (2026-08-11)
+
+A strip pill sat there permanently: "Update landin… · waiting on your reply", a
+session in `~/zenbody` whose Ghostty tab had been closed for hours. Nothing could
+retire it, and Kishan's read ("maybe need an x button or something") was the right
+instinct about the symptom — but the pill was a *lie the mirror couldn't take back*,
+so the fix had to be at the root, with the × only as the escape hatch.
+
+**Why it stranded.** Its wait can only clear on a next turn that will never come.
+Its unseen dot can't be stamped either: "seen" means focusing its surface, and that
+surface no longer exists (`pollLiveSurfaces` even prunes `seenAt` for dead surfaces
+within 10s, so a right-click Clear wouldn't have stuck). And the click was a dead
+end — `joystick-focus.sh` would fall back to matching by cwd and cut a *new* tab.
+
+**Why the row survived at all.** The agent liveness gate was pid-only, resting on
+"the agent pid can't outlive its pane — Ghostty SIGHUPs it on close." Claude Code
+broke that premise: a session can be hosted by a background pty daemon
+(`--bg-pty-host`), and when the tab closes the process is reparented to launchd and
+keeps running. `ps` on the stranded session: `ppid 1`, `tty ??`.
+
+- **The gate is now the controlling terminal** (`Store.detached`): a pane-hosted
+  session's pid has one (ttysNNN), a daemon-hosted one reads NODEV (-1). One
+  `sysctl` — the same `kinfo_proc` fetch `procStartTime` already makes, so
+  `procInfo` was factored out and `e_tdev` read alongside `p_starttime`.
+- **Why not the surface list.** The obvious gate — "its surface isn't in Ghostty's
+  live set" — was built first and thrown away. An agent's surface is a *cached*
+  best-effort focused-surface snapshot (`surface-$sid`, written once at the session's
+  first prompt), so it can point at the wrong pane, and a stale one would hide a
+  resumed session forever. It also needed an as-of stamp on the poll so a
+  brand-new tab (born after the last 10s sample) isn't read as closed. The process
+  is the honest witness; the surface id is hearsay.
+- **Verified it discriminates**: every live in-pane session in the log records a pid
+  with a real tty (`claude_pid()` walks up to the pane-level `claude`); only the
+  daemon-hosted one read -1. Worth re-checking if Claude Code changes its process
+  shape again — if the recorded pid ever became the pty host itself, this gate would
+  drop everything, which is exactly how the first draft failed.
+- **A pill also needs a surface now** (`updateSessionStrip`): a pill's whole job is
+  "click to get back there," so a session with no captured surface no longer earns
+  one. It still gets its board row, where the cwd fallback is a fair offer rather
+  than a promise.
+- **The × is an acknowledgement, not a dismissal** — it calls the row's own
+  `clearRow`, retiring only the wait/unread currently showing; the session's next
+  move raises a fresh pill (verified: cleared, then a new `waiting` re-raised it).
+  Quiet at 0.3 opacity, 0.85 on hover. This is the first affordance on the strip
+  that isn't "go there", and it stays honest with principle #1 because it never
+  suppresses a session, only the flag it's raising right now.
+
+Debt it leaves: the `surface-$sid` cache can still go stale if you close a tab and
+later `--resume` that same session id — the row then points at a dead surface and
+clicking cuts a new tab. The clean fix is anchoring capture to the session's tty
+(the shell emitter already records tty↔surface per pane) instead of "whatever
+Ghostty had in front when you first typed."
+
 ## Roadmap
 
 ### v0.1 — shareable (1–2 weekends)
