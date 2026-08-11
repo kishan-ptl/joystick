@@ -540,18 +540,18 @@ final class Store: ObservableObject {
         //   shell  — its Ghostty surface no longer exists. The surface id is a
         //            reliable per-shell capture and UUIDs are never reused, so
         //            this never wrongly keeps or drops a row.
-        //   agent  — its session process (claude/codex) has exited. An agent row's
-        //            surface is only a best-effort focused-surface snapshot (captured
-        //            once on the session's first prompt); it can point at the WRONG,
-        //            still-open pane, which would keep a closed session's rows
-        //            alive forever. The agent pid can't outlive its pane
-        //            (Ghostty SIGHUPs it on close), so pid-liveness is the
-        //            trustworthy "is the host still here?" signal.
+        //   agent  — its session process (claude/codex) has exited, or has lost its
+        //            controlling terminal (see detached). An agent row can't use the
+        //            surface gate: its surface is only a best-effort focused-surface
+        //            snapshot, cached per session id, so it can point at the WRONG,
+        //            still-open pane — which would keep a closed session's rows alive
+        //            forever. The session's own process is the trustworthy witness to
+        //            "is the host still here?": dead, or terminal-less, means gone.
         //   external — no local host; TTL-gated above, never dropped here.
         pollLiveSurfaces()
         finished.removeAll { op in
             if op.isExternal { return false }
-            if op.isAgent { return !alive(op.pid, since: op.start) }
+            if op.isAgent { return !alive(op.pid, since: op.start) || detached(op) }
             guard let live = liveSurfaces else { return false }
             return !live.contains(op.surface)
         }
@@ -753,6 +753,13 @@ final class Store: ObservableObject {
             let o = g.current
             // The tab you're already in isn't on the strip — you're there.
             if !focused.isEmpty && o.surface == focused { continue }
+            // A pill's whole job is "click to get back there", so one we can't aim
+            // at is noise floating over every window: no captured surface means the
+            // click would fall back to matching by cwd and land you in some other
+            // tab, or cut a brand-new one. That session still gets its board row
+            // (where the cwd fallback is a fair offer, not a promise) — it just
+            // doesn't earn a place on the strip.
+            if o.surface.isEmpty { continue }
             if o.isWaiting || o.unseen {
                 pills.append(SessionPreview(g))
             }
@@ -768,6 +775,7 @@ final class Store: ObservableObject {
         let shown = Array(pills.prefix(cap))
         strip.show(shown, overflow: overflow,
                    onTap: { [weak self] p in self?.focusFromStrip(p) },
+                   onClear: { [weak self] p in self?.clearRow(p.op) },
                    onOverflow: { Summoner.shared.summon() })
     }
 
@@ -1142,12 +1150,21 @@ final class Store: ObservableObject {
     // can't be read. sysctl(KERN_PROC_PID) — a single syscall, no subprocess. Used
     // only to defeat pid reuse in `alive` above.
     private func procStartTime(_ pid: Int32) -> Double? {
+        guard let info = procInfo(pid) else { return nil }
+        let tv = info.kp_proc.p_starttime
+        return Double(tv.tv_sec) + Double(tv.tv_usec) / 1_000_000
+    }
+
+    // pid's controlling terminal device, or nil if unreadable. NODEV (-1) means the
+    // process has no terminal at all — see detached(), above.
+    private func procTdev(_ pid: Int32) -> Int32? { procInfo(pid).map { $0.kp_eproc.e_tdev } }
+
+    private func procInfo(_ pid: Int32) -> kinfo_proc? {
         var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
         var info = kinfo_proc()
         var size = MemoryLayout<kinfo_proc>.stride
         guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return nil }
-        let tv = info.kp_proc.p_starttime
-        return Double(tv.tv_sec) + Double(tv.tv_usec) / 1_000_000
+        return info
     }
 
     // Is an open op's host still around? A shell/Claude op lives while its process
@@ -1156,7 +1173,32 @@ final class Store: ObservableObject {
     // filter, the active-tick liveOpen check, and fold pruning all gate on
     // this, so "hidden from the view" and "freed from memory" can't drift apart.
     private func opHostAlive(_ op: Op, nowTs: Double) -> Bool {
-        op.isExternal ? (nowTs - op.start < Self.externalTTL) : alive(op.pid, since: op.start)
+        if op.isExternal { return nowTs - op.start < Self.externalTTL }
+        return alive(op.pid, since: op.start) && !detached(op)
+    }
+
+    // Has this agent session lost its terminal? Being alive was the whole "is the
+    // host still here?" test for an agent row, on the premise that an agent pid
+    // can't outlive its pane (Ghostty SIGHUPs it on close). Claude Code broke that
+    // premise: a session can be hosted by a background pty daemon (`--bg-pty-host`),
+    // and when its tab closes the process is reparented to launchd and keeps running
+    // with NO controlling terminal.
+    //
+    // Such a row is a lie the mirror can never take back. Its waiting light only
+    // clears on a next turn that will never come; its unseen dot can't be stamped,
+    // because being "seen" means focusing a surface that no longer exists (and
+    // pollLiveSurfaces prunes seenAt for dead surfaces anyway); and a click on it is
+    // a dead end. It stranded on the board and, worse, on the always-on-top strip.
+    //
+    // The controlling tty is the direct, local answer — a pane-hosted session has
+    // one (ttysNNN), a daemon-hosted one reads NODEV. One sysctl, the same call
+    // procStartTime already makes, and unlike the captured surface id it owes
+    // nothing to AppleScript or to a cache that can go stale. Closing the tab is
+    // the dismissal (Principle #1); this is how an agent row finally hears it.
+    private func detached(_ op: Op) -> Bool {
+        guard op.isAgent, op.pid > 0 else { return false }
+        guard let tdev = procTdev(op.pid) else { return false }   // unreadable: assume nothing
+        return tdev == -1
     }
 
     // Classifies what a tty's foreground is doing:
@@ -3248,6 +3290,7 @@ final class StripModel: ObservableObject {
     @Published var previews: [SessionPreview] = []
     @Published var overflow: Int = 0
     var onTap: (SessionPreview) -> Void = { _ in }
+    var onClear: (SessionPreview) -> Void = { _ in }
     var onOverflow: () -> Void = {}
 }
 
@@ -3280,6 +3323,8 @@ struct DirChip: View {
 struct SessionPill: View {
     let p: SessionPreview
     let onTap: () -> Void
+    let onClear: () -> Void
+    @State private var hovering = false
 
     // Border accent per state — the glyph carries the motion, this is a quiet tint.
     private var accent: Color {
@@ -3328,7 +3373,23 @@ struct SessionPill: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
+            // The way off the strip that isn't "go there". A pill is a claim on your
+            // attention floating over every window, so it needs an answer for "not
+            // now" that doesn't cost you a tab switch — but this is an acknowledgement,
+            // NOT a dismissal: it's the row's own right-click Clear (see clearRow),
+            // which retires only the wait/unread that's showing. The next thing this
+            // session does raises a fresh pill. Quiet at rest, lit on hover.
+            Button(action: onClear) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.white.opacity(hovering ? 0.85 : 0.3))
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Clear — leave it, don't switch")
         }
+        .onHover { hovering = $0 }
         .padding(.horizontal, 12)
         .frame(width: StripMetrics.pillW, height: StripMetrics.pillH, alignment: .leading)
         .background(VisualEffectBackground(material: .hudWindow, blending: .behindWindow))
@@ -3373,7 +3434,7 @@ struct SessionStripView: View {
     var body: some View {
         HStack(spacing: StripMetrics.gap) {
             ForEach(model.previews) { p in
-                SessionPill(p: p) { model.onTap(p) }
+                SessionPill(p: p, onTap: { model.onTap(p) }, onClear: { model.onClear(p) })
             }
             if model.overflow > 0 {
                 OverflowPill(count: model.overflow) { model.onOverflow() }
@@ -3406,8 +3467,10 @@ final class SessionStripController {
 
     func show(_ previews: [SessionPreview], overflow: Int,
               onTap: @escaping (SessionPreview) -> Void,
+              onClear: @escaping (SessionPreview) -> Void,
               onOverflow: @escaping () -> Void) {
         model.onTap = onTap
+        model.onClear = onClear
         model.onOverflow = onOverflow
         let wasVisible = panel?.isVisible == true
         if current == previews, currentOverflow == overflow, wasVisible { return }  // no change — skip redraw
