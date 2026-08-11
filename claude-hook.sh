@@ -6,14 +6,16 @@
 # SessionStart          -> "reset" on /clear|/resume|/compact (retire prior row now)
 # UserPromptSubmit      -> "start" (turn shows as running)
 # PreToolUse            -> "active" at the START of a Task/Agent (subagents only)
-# Stop / StopFailure    -> "end" (exit 0 / 1) + done / failed desktop notification
-# Notification          -> "waiting" (blocked on you) + notification
+# Stop / StopFailure    -> "end" (exit 0 / 1)
+# Notification          -> "waiting" (blocked on you)
 # PostToolUse(Failure)  -> "active" carrying live activity (or "⚠ tool failed")
+#
+# The hook only ever WRITES to the log — it raises no desktop notifications. The
+# app's session strip is the push channel now; see NOTES.md "Notifications off".
 set -u
 
 LOG="${XDG_STATE_HOME:-$HOME/.local/state}/joystick/events.jsonl"
 mkdir -p "${LOG:h}"
-MIN_NOTIFY_SECS=30
 # Source our shared sanitizer from our OWN directory (this hook is executed by
 # Claude from $JOYSTICK_HOME when installed, or ~/joystick in the dev repo).
 _jdir=${0:A:h}
@@ -41,17 +43,6 @@ claude_pid() {
     [[ -n $p && $p != 0 && $p != 1 ]] || break
   done
   print -r -- "$PPID"
-}
-
-ghostty_frontmost() {
-  lsappinfo info -only name "$(lsappinfo front 2>/dev/null)" 2>/dev/null | grep -qi ghostty
-}
-
-notify() {  # $1 = title, $2 = message
-  [[ -n ${JOYSTICK_NO_NOTIFY:-} ]] && return 0   # silence (used by tests)
-  osascript -e 'on run argv' \
-    -e 'display notification (item 2 of argv) with title (item 1 of argv) sound name "Glass"' \
-    -e 'end run' "$1" "$2" 2>/dev/null
 }
 
 # Resolve this turn's transcript file: the hook-provided path, else the
@@ -140,9 +131,9 @@ drain_finished_bg() {
 # Close this session's open turn (if any) with the given exit code. Decides
 # open/closed from start/end lines only — a turn that went start→waiting→active
 # (you approved a permission prompt) has `active` last; including it would
-# wrongly skip the end + notification, exactly when you stepped away. Stop also
-# fires on /clear/resume/compact, which have no open turn.
-close_turn() {  # $1 = exit code  $2 = notify title  $3 = notify verb
+# wrongly skip the `end`, exactly when you stepped away. Stop also fires on
+# /clear/resume/compact, which have no open turn.
+close_turn() {  # $1 = exit code
   rm -f "${LOG:h}/waiting-$sid"
   local last start_ts elapsed tpath summary=""
   # Reconcile finished background work FIRST, before the open-turn gate below.
@@ -190,9 +181,6 @@ close_turn() {  # $1 = exit code  $2 = notify title  $3 = notify verb
   now=$(date +%s); elapsed=$(( now - start_ts ))
   jq -cn --arg id "$id" --arg msg "$summary" --argjson ts "$now" --argjson dur "$elapsed" --argjson ex "$1" \
     '{v:1,ev:"end",id:$id,exit:$ex,dur:$dur,ts:$ts} + (if $msg != "" then {msg:$msg} else {} end)' >> "$LOG"
-  if (( elapsed >= MIN_NOTIFY_SECS )) && ! ghostty_frontmost; then
-    notify "$2" "$3 after $((elapsed / 60))m$((elapsed % 60))s in ${cwd:t}"
-  fi
   emit_meta "$tpath"
 }
 
@@ -331,8 +319,8 @@ case $event in
     [[ -f $tp ]] || tp="$HOME/.claude/projects/${cwd//\//-}/$sid.jsonl"
     emit_meta "$tp" &!
     ;;
-  Stop)         close_turn 0 "Claude Code — done"   "Finished" ;;
-  StopFailure)  close_turn 1 "Claude Code — failed" "Failed"   ;;
+  Stop)         close_turn 0 ;;
+  StopFailure)  close_turn 1 ;;
   Notification)
     # Claude is blocked on the user (permission prompt or idle). Mark the open
     # turn as waiting; the next PostToolUse means we're unblocked again.
@@ -350,9 +338,6 @@ case $event in
     jq -cn --arg id "$id" --arg msg "$msg" --argjson ts "$now" \
       '{v:1,ev:"waiting",id:$id,msg:$msg,ts:$ts}' >> "$LOG"
     : > "${LOG:h}/waiting-$sid"
-    if ! ghostty_frontmost; then
-      notify "Claude Code — waiting" "$msg (${cwd:t})"
-    fi
     ;;
   PreToolUse)
     # A subagent (Task) runs long and in the BACKGROUND: its tool call returns at

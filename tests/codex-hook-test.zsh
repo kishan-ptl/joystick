@@ -6,7 +6,6 @@ set -u
 H=${0:A:h}/../codex-hook.sh       # the hook beside this test (worktree-aware)
 TMP=$(mktemp -d)
 export XDG_STATE_HOME=$TMP
-export JOYSTICK_NO_NOTIFY=1            # don't fire real macOS notifications
 LOG=$TMP/joystick/events.jsonl
 pass=0 fail=0
 

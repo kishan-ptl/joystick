@@ -119,7 +119,6 @@ final class Store: ObservableObject {
 
     private var ttyStates: [String: TtyState] = [:]
     private var lastStallCheck = Date.distantPast
-    private var notifiedWaiting: Set<String> = []
     // --- Session strip: a top-center HUD laying out one frosted pill per in-flight
     // agent session — actively working, blocked needing you, or freed-but-not-yet-
     // visited — stable-ordered to match the window's slots. It is PURELY derived from
@@ -508,8 +507,6 @@ final class Store: ObservableObject {
             let liveKeys = Set(running.map(\.groupKey))
             clearedWaitingAt = clearedWaitingAt.filter { liveKeys.contains($0.key) }
         }
-        notifyNewlyWaiting(running: running)
-
         // minDoneSecs hides trivial finished shell commands (a 2s `ls` leaves no
         // row). Agent turns and external events are always meaningful — keep them
         // regardless of duration, so a quick turn doesn't vanish into the gap
@@ -1280,19 +1277,6 @@ final class Store: ObservableObject {
         return ports.sorted()
     }
 
-    // Notify once per op when it first enters a stall-detected waiting state.
-    // (Claude waiting events already notify from the hook itself.)
-    private func notifyNewlyWaiting(running: [Op]) {
-        let stalled = running.filter { $0.stallIdle != nil && $0.waitingSince == nil }
-        for op in stalled where !notifiedWaiting.contains(op.id) {
-            notifiedWaiting.insert(op.id)
-            if NSWorkspace.shared.frontmostApplication?.bundleIdentifier != "com.mitchellh.ghostty" {
-                notifyUser(title: "Waiting for your input?",
-                           body: "\(op.cmd) — quiet for \(fmt(op.stallIdle ?? 0)) in \(tilde(op.cwd))")
-            }
-        }
-        notifiedWaiting.formIntersection(Set(running.filter(\.isWaiting).map(\.id)))
-    }
 
     // Poll Ghostty for the set of live surface ids, off the main thread,
     // at most every 10s. nil result (e.g. automation denied) keeps the
@@ -1390,14 +1374,6 @@ final class Store: ObservableObject {
         return Set(ids)
     }
 
-    private func notifyUser(title: String, body: String) {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-e", "on run argv",
-                       "-e", "display notification (item 2 of argv) with title (item 1 of argv) sound name \"Glass\"",
-                       "-e", "end run", title, body]
-        try? p.run()
-    }
 }
 
 // MARK: - Formatting

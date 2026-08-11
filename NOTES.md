@@ -628,6 +628,41 @@ clicking cuts a new tab. The clean fix is anchoring capture to the session's tty
 (the shell emitter already records tty↔surface per pane) instead of "whatever
 Ghostty had in front when you first typed."
 
+## Notifications off — the strip is the push channel (2026-08-11)
+
+Every desktop notification is gone: Joystick no longer calls `display notification`
+anywhere. Kishan's call once the session strip had been live a while — a pill that
+appears the moment a session becomes your move does the same job *in place*, without
+the Notification Centre pile-up or the sound. It also puts the product back behind
+principle #1: the app shows you state, it doesn't send you messages.
+
+Removed in one pass — all four sites plus their scaffolding (`notify()`,
+`ghostty_frontmost()`, `MIN_NOTIFY_SECS`, `JOYSTICK_NO_NOTIFY`, and the app's
+`notifyNewlyWaiting` / `notifyUser` / `notifiedWaiting`):
+
+- `claude-hook.sh` — turn done/failed (≥30s, Ghostty not frontmost), and waiting.
+- `codex-hook.sh` — turn done, and waiting.
+- `Joystick.swift` — the shell **stall** heuristic's "Waiting for your input?".
+
+The hooks now only ever WRITE to the log, which sharpens the emitter contract: they
+observe, the app decides what to surface. `close_turn` lost its title/verb arguments
+along with the notification they fed.
+
+It also shook out a latent flake in `tests/hook-test.zsh`. Its last assertion counts
+the whole log ("every event carries v:1"), and `UserPromptSubmit` emits its `meta`
+from a DETACHED job (`emit_meta … &!`, so a transcript parse never delays your
+prompt) that outlives the `fire` which spawned it — so the count could catch a
+half-written log and read one `"ev":` more than `"v":1`. It had always been possible;
+dropping the `lsappinfo` call from the notification path removed the padding that
+had been hiding it (~1 run in 20 before, and it hit twice in a row once). The test
+now settles — waits for the log to stop growing — before any whole-log assertion.
+
+**The one thing the strip does not cover**: that third site was for *shell* ops (an
+`eas submit` sitting on a prompt, caught by the tty-idle heuristic), and the strip is
+agents-only — so a stalled shell now signals through the menubar hand and its board
+row, with no push. If that bites, the fix is to let a shell wait earn a pill, not to
+bring the notification back. The old code is one `git show` away either way.
+
 ## Roadmap
 
 ### v0.1 — shareable (1–2 weekends)
@@ -778,8 +813,8 @@ annoyances are the real v0.2.
 
 ## Craft backlog
 - Subtle pulse on running rows; amber treatment for waiting
-- Actionable notifications (click → focus tab) via UNUserNotificationCenter
-- Notification when an op *enters* waiting (the "eas submit sat for 10 min" fix)
+- A pill for a stalled *shell* op — the "eas submit sat for 10 min" case, which the
+  agents-only strip doesn't cover now that notifications are gone (see above)
 - Pin state persistence; window vibrancy/translucency pass
 - Name TBD — "joystick" is functional; control-tower/radar metaphor may
   screenshot better
