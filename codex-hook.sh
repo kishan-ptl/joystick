@@ -11,17 +11,19 @@
 # SessionStart       -> "reset" on clear|resume|compact (retire prior row now)
 # UserPromptSubmit   -> "start" (turn shows as running) + "meta" (model/mode)
 # PostToolUse        -> "active" (live activity subtitle; clears waiting)
-# PermissionRequest  -> "waiting" (blocked on you) + notification
-# Stop               -> "end" (exit 0) + closing blurb + done notification
+# PermissionRequest  -> "waiting" (blocked on you)
+# Stop               -> "end" (exit 0) + closing blurb
 #
 # Codex is cleaner than Claude in two ways we lean on: every payload carries
 # `model` + `permission_mode` (so meta needs no transcript parse), and Stop
 # hands us `last_assistant_message` directly (no transcript-poll race).
+#
+# Like the Claude hook, this only ever WRITES to the log — no desktop
+# notifications; the app's session strip is the push channel now.
 set -u
 
 LOG="${XDG_STATE_HOME:-$HOME/.local/state}/joystick/events.jsonl"
 mkdir -p "${LOG:h}"
-MIN_NOTIFY_SECS=30
 # Source our shared sanitizer from our OWN directory (this hook is executed by
 # Codex from $JOYSTICK_HOME when installed, or ~/joystick in the dev repo).
 _jdir=${0:A:h}
@@ -55,17 +57,6 @@ codex_pid() {
     [[ -n $p && $p != 0 && $p != 1 ]] || break
   done
   print -r -- "$PPID"
-}
-
-ghostty_frontmost() {
-  lsappinfo info -only name "$(lsappinfo front 2>/dev/null)" 2>/dev/null | grep -qi ghostty
-}
-
-notify() {  # $1 = title, $2 = message
-  [[ -n ${JOYSTICK_NO_NOTIFY:-} ]] && return 0   # silence (used by tests)
-  osascript -e 'on run argv' \
-    -e 'display notification (item 2 of argv) with title (item 1 of argv) sound name "Submarine"' \
-    -e 'end run' "$1" "$2" 2>/dev/null
 }
 
 # Session metadata: model + permission mode, both carried on EVERY Codex hook
@@ -156,9 +147,6 @@ case $event in
     jq -cn --arg id "$id" --arg msg "$msg" --argjson ts "$now" \
       '{v:1,ev:"waiting",id:$id,msg:$msg,ts:$ts}' >> "$LOG"
     : > "${LOG:h}/waiting-$sid"
-    if ! ghostty_frontmost; then
-      notify "Codex — waiting" "$msg (${cwd:t})"
-    fi
     ;;
   Stop)
     # A turn is stopping. Close the open turn with the closing blurb (handed to
@@ -176,9 +164,6 @@ case $event in
     elapsed=$(( now - start_ts ))
     jq -cn --arg id "$id" --arg msg "$summary" --argjson ts "$now" --argjson dur "$elapsed" \
       '{v:1,ev:"end",id:$id,exit:0,dur:$dur,ts:$ts} + (if $msg != "" then {msg:$msg} else {} end)' >> "$LOG"
-    if (( elapsed >= MIN_NOTIFY_SECS )) && ! ghostty_frontmost; then
-      notify "Codex — done" "Finished after $((elapsed / 60))m$((elapsed % 60))s in ${cwd:t}"
-    fi
     emit_meta
     ;;
 esac

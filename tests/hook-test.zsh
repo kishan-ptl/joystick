@@ -5,7 +5,6 @@ set -u
 H=${0:A:h}/../claude-hook.sh      # the hook beside this test (worktree-aware)
 TMP=$(mktemp -d)
 export XDG_STATE_HOME=$TMP
-export JOYSTICK_NO_NOTIFY=1            # don't fire real macOS notifications
 LOG=$TMP/joystick/events.jsonl
 pass=0 fail=0
 
@@ -149,6 +148,24 @@ fire '{"hook_event_name":"UserPromptSubmit","session_id":"s10","cwd":"/tmp","pro
 fire "$(jq -cn --arg m "Claude needs your permission to use Bash(curl -H 'Authorization: Bearer sk-verysecrettoken12345')" '{hook_event_name:"Notification",session_id:"s10",cwd:"/tmp",message:$m}')"
 check "notification secret not logged" "$(grep '"id":"claude-s10"' "$LOG" | grep '"ev":"waiting"' | grep -c 'verysecrettoken')" "0"
 check "notification msg masked"        "$(grep '"id":"claude-s10"' "$LOG" | grep '"ev":"waiting"' | jq -r '.msg' | grep -c '•••')" "1"
+
+# Wait for in-flight emitter work before any whole-log assertion. UserPromptSubmit
+# emits its `meta` from a DETACHED job (`emit_meta ... &!`, so a transcript parse
+# never delays your prompt), which outlives the `fire` that spawned it — count the
+# log while that's still landing and you're counting a half-written picture. This
+# flaked ~1 run in 20 until the hook stopped shelling out to lsappinfo for
+# notifications, which had been padding the gap.
+settle() {
+  local prev=-1 size
+  sleep 0.15
+  for _ in {1..40}; do
+    size=$(wc -c < "$LOG")
+    [[ $size == $prev ]] && return
+    prev=$size
+    sleep 0.05
+  done
+}
+settle
 
 # Every emitted event carries the schema version.
 check "events are v:1" "$(grep -c '"v":1' "$LOG")" "$(grep -c '"ev":' "$LOG")"
