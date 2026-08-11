@@ -2901,14 +2901,30 @@ struct MenuBarLabel: View {
         let working = store.activeGroups.filter { $0.current.isAgent && !$0.current.isWaiting }.count
         if waiting > 0 {
             // Needs-you always wins the icon — the gold alarm, the count is who's blocked.
-            Label("\(waiting)", systemImage: "hand.raised.fill")
+            CountedIcon(symbol: "hand.raised.fill", count: waiting)
                 .foregroundStyle(Color.summaryYellow)   // the #DCC98F app-icon gold
         } else if working > 0 {
             // N agents working: the joystick + a plain count in the menubar's own tint
             // (gold stays reserved for "needs you"), so it reads as status, not alarm.
-            Label("\(working)", systemImage: "gamecontroller")
+            CountedIcon(symbol: "gamecontroller", count: working)
         } else {
             Image(systemName: "gamecontroller")
+        }
+    }
+}
+
+// Glyph + tally for the menubar. Laid out by hand because a `Label` here renders
+// icon-ONLY — MenuBarExtra resolves its label style that way in the status item,
+// so both counts were silently dropped and the icon just switched shape. Digits are
+// monospaced so the item doesn't twitch as the tally ticks past you.
+private struct CountedIcon: View {
+    let symbol: String
+    let count: Int
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: symbol)
+            Text("\(count)")
+                .font(.system(size: 12, weight: .semibold).monospacedDigit())
         }
     }
 }
