@@ -495,8 +495,8 @@ Viewer: rather than special-case a second kind, generalized the fold's Claude-on
 paths to an **`isAgent` (claude || codex)** notion — session-id grouping, the
 session-rotation retirement, the queued-prompt late-end guard, pid-liveness, the
 tally, and the day digest all now key on isAgent. Codex gets a distinct-but-subtle
-look: its own `codexTeal` accent + the shared thinking-sparkle tinted teal (vs
-Claude's terracotta) so two agent sessions in one repo are legible side by side.
+look: its own `codexTeal` accent + (since 2026-08-14, below) its own working
+spinner, so two agent sessions in one repo are legible side by side.
 `codex` joins the interactive-app IGNORE set so the raw TUI process isn't also a
 shell row.
 
@@ -662,6 +662,24 @@ now settles — waits for the log to stop growing — before any whole-log asser
 agents-only — so a stalled shell now signals through the menubar hand and its board
 row, with no push. If that bites, the fix is to let a shell wait earn a pill, not to
 bring the notification back. The old code is one `git show` away either way.
+
+## Each agent spins its own spinner (2026-08-14)
+
+The working glyph was one animation in two colours: Claude's twinkling asterisk,
+tinted teal for Codex. Kishan's call — that's Claude's motion wearing a Codex
+coat, and a Codex row should look like Codex. So `AgentThinkingIcon` now takes
+`isCodex` and picks the whole spinner, frames and cadence and tint together:
+Claude keeps `· ✢ ✳ ✶ ✻ ✽` at 0.16s; Codex gets the braille dots from its own TUI,
+`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` at ~0.08s, monospaced so they read as terminal dots and not as
+punctuation. Frames lifted from the shipped binary, not from memory
+(`perl -0777 -ne '/(?:\xE2[\xA0-\xA3][\x80-\xBF]){3,}/' $(which codex)`), so they
+are exactly what the terminal shows.
+
+The point is that motion, not colour, is the first thing you recognise: a glance
+at the board says "the Codex one is still going" before any tint registers. Both
+call sites (board row + strip pill) now pass `isCodex` and stop repeating the
+tint ternary. Every later adapter (opencode, Gemini, Copilot) should bring its own
+frames the same way rather than inherit someone else's.
 
 ## Roadmap
 

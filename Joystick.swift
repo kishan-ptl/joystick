@@ -1466,24 +1466,34 @@ extension Color {
     }
 }
 
-// The twinkling asterisk Claude shows while thinking, reproduced as a breathing
-// star so a working Claude row reads at a glance. Frame-cycled (not tweened) to
-// match the terminal spinner, in Claude's brand orange.
-// The twinkling sparkle shown while an agent turn is in flight. Tinted per
-// agent (claudeOrange for Claude, codexTeal for Codex) so the two are legible
-// side by side; the animation itself is shared.
+// The spinner an agent shows while a turn is in flight — each vendor's OWN
+// spinner, frame for frame, not one animation recoloured. A row reads as Claude
+// or as Codex from the motion alone, before you register the tint:
+//   Claude — the twinkling asterisk from its terminal, in Claude's brand orange.
+//   Codex  — the braille dot spinner from its TUI (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏, lifted from the
+//            codex binary), in codexTeal, at the terminal's own ~80ms cadence.
+// Frame-cycled, never tweened, for the same reason: that's what the terminal does.
 struct AgentThinkingIcon: View {
-    var tint: Color = .claudeOrange
-    private static let frames = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"]
-    private static let interval = 0.16
+    var isCodex: Bool = false
+
+    private static let claudeFrames = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"]
+    private static let codexFrames  = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+    private var frames: [String] { isCodex ? Self.codexFrames : Self.claudeFrames }
+    private var interval: Double { isCodex ? 0.08 : 0.16 }
+    private var tint: Color { isCodex ? .codexTeal : .claudeOrange }
 
     var body: some View {
         // TimelineView drives the redraw and naturally pauses when the row
         // isn't on screen — no manual Timer to leak or reset on every reload.
-        TimelineView(.periodic(from: .now, by: Self.interval)) { context in
-            let step = Int(context.date.timeIntervalSinceReferenceDate / Self.interval)
-            Text(Self.frames[step % Self.frames.count])
-                .font(.system(size: 15, weight: .medium))
+        TimelineView(.periodic(from: .now, by: interval)) { context in
+            let step = Int(context.date.timeIntervalSinceReferenceDate / interval)
+            Text(frames[step % frames.count])
+                // Braille wants a monospaced face (and a touch more weight) to
+                // read as the terminal's dots rather than as punctuation.
+                .font(.system(size: isCodex ? 16 : 15,
+                              weight: isCodex ? .bold : .medium,
+                              design: isCodex ? .monospaced : .default))
                 .foregroundStyle(tint)
                 .frame(width: 16, height: 16)   // fixed box so glyph width can't jitter the row
         }
@@ -1726,7 +1736,7 @@ struct OpRow: View {
             } else if op.isService {
                 Image(systemName: "antenna.radiowaves.left.and.right").foregroundStyle(Color.servingGreen)
             } else if op.isRunning && op.isAgent {
-                AgentThinkingIcon(tint: op.isCodex ? .codexTeal : .claudeOrange)   // twinkling sparkle while a turn is in flight
+                AgentThinkingIcon(isCodex: op.isCodex)   // that agent's own spinner while a turn is in flight
             } else if op.isRunning {
                 Image(systemName: "play.circle.fill").foregroundStyle(.blue)
             } else if hasLiveBg, op.exitCode == 0 {
@@ -3232,7 +3242,7 @@ struct SessionPreview: Equatable, Identifiable {
     let blurb: String
     let worktree: String   // linked-worktree leaf ("" for the main checkout)
     let dir: String        // cwd's directory name — the "where" when not a worktree
-    let isCodex: Bool       // agent kind, for the working sparkle's tint
+    let isCodex: Bool       // agent kind, which picks the working spinner (frames + tint)
     let working: Bool      // running, not blocked
     let waiting: Bool      // blocked, your move
     let failed: Bool       // finished non-zero
@@ -3309,7 +3319,7 @@ struct DirChip: View {
 }
 
 // One frosted capsule per in-flight session: the state glyph (reusing the row's own
-// vocabulary — breathing gold = needs you, the agent sparkle = working, ✓/✗ = result),
+// vocabulary — breathing gold = needs you, the agent's own spinner = working, ✓/✗ = result),
 // the session name + a "where" chip (worktree branch, else directory), and the last
 // thing it said. A click focuses the tab.
 struct SessionPill: View {
@@ -3330,7 +3340,7 @@ struct SessionPill: View {
         if p.waiting {
             WaitingLight()                                        // soft gold breathing = needs you
         } else if p.working {
-            AgentThinkingIcon(tint: p.isCodex ? .codexTeal : .claudeOrange)  // twinkling sparkle = working
+            AgentThinkingIcon(isCodex: p.isCodex)                  // that agent's own spinner = working
         } else if p.failed {
             Image(systemName: "xmark.circle.fill")
                 .font(.system(size: 13, weight: .semibold))
