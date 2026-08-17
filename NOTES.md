@@ -703,6 +703,52 @@ bursts (reload → focus → reload) into one panel update. Standing rule that t
 encodes: an AppKit window hosting SwiftUI must never be laid out synchronously from
 code that may itself be running inside a SwiftUI update.
 
+## Pills that came back after every tap — a resumed session's dead surface (2026-08-17)
+
+Four pills sat on the strip and returned within seconds of a tap and within ~10s of
+a ×. All four were sessions in the 4-split `~/zenbody` tab that had been
+`--resume`d the evening before into *new* panes: the hook's `surface-<sid>` cache,
+written once at the session's first prompt, still held the surface id of the pane
+each had originally run in — surfaces that no longer existed. That is exactly the
+debt the orphaned-pill entry above left open, now with its consequence spelled out:
+
+- The viewer's seen model could never take the flag back. `pollLiveSurfaces` prunes
+  `seenAt` to Ghostty's live set every 10s, so a stamp on a dead surface (a tap's
+  `focus()`, a ×'s `clearRow`) evaporated, `unseen` flipped back to true, and the
+  pill/dot/dock tally returned. A pill's own rule ("no captured surface → no pill")
+  didn't catch it because the surface wasn't *empty*, just wrong.
+
+Fixed at both layers, each in its own terms:
+
+- **Emitter** (`claude-hook.sh`, `codex-hook.sh`): `SessionStart` drops
+  `surface-<sid>` alongside refreshing `cpid-<sid>` — a (re)start is a new
+  incarnation, possibly in a new pane, so the next prompt re-captures from where you
+  are actually typing. Every source (startup has none; harmless).
+- **Viewer** (`Store.surfaceReachable`): "unseen" and a strip pill both require a
+  surface a visit can be witnessed on — non-empty AND not known-gone. Known-gone is
+  judged against the last live-surface sample with an as-of stamp: absent from it
+  *and* started before it. An op that started after the sample can't be judged (a
+  tab born since isn't in it) and gets the benefit of the doubt; no sample yet
+  (launch, automation denied) means we can't vouch, so nothing is raised. The row
+  itself is untouched — the process is its host (`detached`), the surface is only
+  its address. `markUnread` gates on the same predicate. Semantics change to note:
+  a *surfaceless* agent result used to be unseen forever (a dot no visit could
+  clear, `seenAt[""]` is never stamped); it now raises no dot at all — same rule as
+  the strip already applied. Landing a fresh live-surface sample re-derives
+  (`reload()`), so the first sample after launch and a closed tab take effect at
+  once instead of on the backstop.
+- **Two smaller staleness holes closed on the way**, same root: derived `unseen`
+  on the groups is a snapshot from the last reload. `focus()` now re-derives after
+  its stamp (as `clearRow`/`markUnread` already did), and the focus-change branch
+  of `pollFocusedSurface` calls `reload()` instead of re-laying the strip from that
+  snapshot — a turn that ended in the ≤250ms after a stamp, followed by a tab
+  switch within the backstop, could flash a pill for the tab you were sitting in.
+
+The four poisoned caches on this machine were deleted by hand (the fix would have
+dropped them at the resume); their next prompt re-captures. Residual: the row's
+right-click "Mark unread" still shows on a known-gone row and is inert there (the
+menubar row has no store to ask) — rare now that the source is fixed.
+
 ## Roadmap
 
 ### v0.1 — shareable (1–2 weekends)
@@ -888,7 +934,8 @@ annoyances are the real v0.2.
   "turn actually started" signal — worth a /feedback request. (2026-06-15)
 - The hook leaks per-session scratch files in `~/.local/state/joystick/`:
   `cpid-<sid>` and `surface-<sid>` are written once per session and **never**
-  removed; `waiting-<sid>` is removed on the next event but orphans when a session
+  removed (`surface-<sid>` is now dropped on `SessionStart`, 2026-08-17 — see the
+  dead-surface entry — but a session that simply exits still leaves both); `waiting-<sid>` is removed on the next event but orphans when a session
   ends while waiting; `jshell-<sid>-<tuid>` (background-shell markers, 2026-06-16)
   and `jagent-<sid>-<tuid>` (background-agent markers, 2026-06-16) orphan when a
   session dies mid-shell/mid-agent. All are 0-byte and functionally inert (the

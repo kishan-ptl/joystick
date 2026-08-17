@@ -54,6 +54,11 @@ fire '{"hook_event_name":"SessionStart","session_id":"s4","cwd":"/tmp","source":
 check "SessionStart startup: nothing" "$(lines s4)" "0"
 fire '{"hook_event_name":"SessionStart","session_id":"s5","cwd":"/tmp","source":"clear"}'
 check "SessionStart clear: reset" "$(field s5 reset '.ev')" "reset"
+# ...and any source drops the sid-keyed surface cache (a resume in a new pane
+# must not inherit the old pane's — dead — surface).
+print -r -- "DEADBEEF-0000" > "$TMP/joystick/surface-s6"
+fire '{"hook_event_name":"SessionStart","session_id":"s6","cwd":"/tmp","source":"resume"}'
+check "SessionStart resume drops surface cache" "$([[ -e $TMP/joystick/surface-s6 ]] && echo yes || echo no)" "no"
 
 print "pass=$pass fail=$fail"
 exit $(( fail == 0 ? 0 : 1 ))
