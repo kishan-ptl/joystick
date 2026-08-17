@@ -3461,11 +3461,25 @@ final class StripHostingView: NSHostingView<SessionStripView> {
 // the panel on first show, so nothing appears at launch until a session is in flight.
 // The window frame is computed from StripMetrics + the pill count (deterministic, so
 // it resizes cleanly on the frame the count changes — no fittingSize round-trip).
+//
+// show/hide only RECORD what the Store wants; the panel is driven on the next
+// run-loop turn (sync()). That hop is what makes them safe to call from any Store
+// context: reload() also runs inside Store.init(), which SwiftUI executes inside its
+// own graph update (the @StateObject in JoystickApp) — and driving the panel there
+// (setFrame lays out its NSHostingView, whose ViewGraph then sets attributes
+// mid-update) trips AttributeGraph's re-entrancy precondition and aborts the app at
+// launch (2026-08-17: every launch with a pill to show crashed). Deferring is
+// invisible to the eye and coalesces same-turn bursts (reload → focus → reload)
+// into one panel update.
 final class SessionStripController {
     private var panel: NSPanel?
     private let model = StripModel()
     private var current: [SessionPreview] = []
     private var currentOverflow = -1
+    // What the Store last asked for (nil = hidden), applied by the pending sync().
+    private var wanted: [SessionPreview]? = nil
+    private var wantedOverflow = 0
+    private var syncScheduled = false
 
     func show(_ previews: [SessionPreview], overflow: Int,
               onTap: @escaping (SessionPreview) -> Void,
@@ -3474,6 +3488,29 @@ final class SessionStripController {
         model.onTap = onTap
         model.onClear = onClear
         model.onOverflow = onOverflow
+        wanted = previews
+        wantedOverflow = overflow
+        setNeedsSync()
+    }
+
+    func hide() {
+        wanted = nil
+        setNeedsSync()
+    }
+
+    private func setNeedsSync() {
+        if syncScheduled { return }
+        syncScheduled = true
+        DispatchQueue.main.async { [weak self] in self?.sync() }
+    }
+
+    private func sync() {
+        syncScheduled = false
+        guard let previews = wanted else { applyHide(); return }
+        applyShow(previews, overflow: wantedOverflow)
+    }
+
+    private func applyShow(_ previews: [SessionPreview], overflow: Int) {
         let wasVisible = panel?.isVisible == true
         if current == previews, currentOverflow == overflow, wasVisible { return }  // no change — skip redraw
         current = previews
@@ -3485,7 +3522,7 @@ final class SessionStripController {
         if !wasVisible { fadeIn() }
     }
 
-    func hide() {
+    private func applyHide() {
         current = []
         currentOverflow = -1
         guard let panel, panel.isVisible else { return }

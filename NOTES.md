@@ -681,6 +681,28 @@ call sites (board row + strip pill) now pass `isCodex` and stop repeating the
 tint ternary. Every later adapter (opencode, Gemini, Copilot) should bring its own
 frames the same way rather than inherit someone else's.
 
+## Launch crash: the strip drove its panel from inside SwiftUI's graph update (2026-08-17)
+
+Every launch aborted (`AG::precondition_failure` in `AttributeGraph`) with a stack of
+`Store.init → reload → updateSessionStrip → SessionStripController.position →
+NSWindow.setFrame → NSHostingView.layout`. `@StateObject var store = Store()` means
+`Store.init()` runs *inside* the app graph's update; the initial `reload()` there
+mounted the strip panel synchronously, and `setFrame(display:true)` laid out the
+panel's hosting view, whose own ViewGraph then set attributes mid-update — the
+re-entrancy AttributeGraph forbids. It only fires when there is a pill to show at
+launch (a done-unseen or waiting agent session with a surface, not focused), which
+is why it stayed hidden after the strip landed and then hit on every launch once
+eight such sessions had piled up.
+
+The fix is in the controller, not a one-off guard at the call site: `show`/`hide`
+now only record the wanted state and schedule a single `sync()` on the next
+run-loop turn (`setNeedsLayout`-style coalescing); the panel is created, sized and
+faded there. That makes the strip safe to poke from *any* Store context — init,
+onAppear, timers, focus polls — with a hop nobody can see, and it folds same-turn
+bursts (reload → focus → reload) into one panel update. Standing rule that this
+encodes: an AppKit window hosting SwiftUI must never be laid out synchronously from
+code that may itself be running inside a SwiftUI update.
+
 ## Roadmap
 
 ### v0.1 — shareable (1–2 weekends)
