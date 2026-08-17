@@ -139,6 +139,7 @@ final class Store: ObservableObject {
     private var fold = EventFold()            // pure left-fold of the log → open/done/meta
     private var lastPersistedFocus: String? = nil
     private var liveSurfaces: Set<String>? = nil
+    private var liveSurfacesAsOf = Date.distantPast   // when that sample was taken (see surfaceReachable)
     private var lastSurfacePoll = Date.distantPast
     private var lastFocusPoll = Date.distantPast
     // surface id -> last time it was focused while Ghostty was frontmost
@@ -554,11 +555,14 @@ final class Store: ObservableObject {
         }
 
         // Unread badges: a finished op is unseen until its surface has been
-        // focused (in Ghostty, by any means) after the op ended.
+        // focused (in Ghostty, by any means) after the op ended. That takes a
+        // surface a visit can be witnessed on: with none, or one Ghostty says is
+        // gone, the dot could never clear — so it isn't raised (surfaceReachable).
         pollFocusedSurface()
         finished = finished.map { op -> Op in
             var op = op
-            op.unseen = !op.isExternal && (seenAt[op.surface] ?? 0) < (op.endTs ?? 0)
+            op.unseen = !op.isExternal && surfaceReachable(op)
+                && (seenAt[op.surface] ?? 0) < (op.endTs ?? 0)
             return op
         }
 
@@ -731,6 +735,11 @@ final class Store: ObservableObject {
         p.executableURL = URL(fileURLWithPath: "/bin/zsh")
         p.arguments = [Self.focusScript, op.surface.isEmpty ? "-" : op.surface, op.cwd]
         try? p.run()
+        // Re-derive from the fresh stamp (dot, dock badge, strip) the way clearRow
+        // and markUnread do — the derived `unseen` on the groups is otherwise stale
+        // until the next event or backstop, and anything reading it in between (a
+        // focus change re-laying the strip) would flag this op again.
+        reload()
     }
 
     // Drive the top-center session strip. Membership is derived fresh every call
@@ -751,12 +760,14 @@ final class Store: ObservableObject {
             // The tab you're already in isn't on the strip — you're there.
             if !focused.isEmpty && o.surface == focused { continue }
             // A pill's whole job is "click to get back there", so one we can't aim
-            // at is noise floating over every window: no captured surface means the
-            // click would fall back to matching by cwd and land you in some other
-            // tab, or cut a brand-new one. That session still gets its board row
-            // (where the cwd fallback is a fair offer, not a promise) — it just
-            // doesn't earn a place on the strip.
-            if o.surface.isEmpty { continue }
+            // at is noise floating over every window: no captured surface — or one
+            // Ghostty says is gone (a stale cache from a resume in another pane) —
+            // means the click would fall back to matching by cwd and land you in
+            // some other tab, or cut a brand-new one; and landing on the real pane
+            // could never retire it. That session still gets its board row (where
+            // the cwd fallback is a fair offer, not a promise) — it just doesn't
+            // earn a place on the strip.
+            if !surfaceReachable(o) { continue }
             if o.isWaiting || o.unseen {
                 pills.append(SessionPreview(g))
             }
@@ -777,12 +788,10 @@ final class Store: ObservableObject {
     }
 
     private func focusFromStrip(_ p: SessionPreview) {
-        focus(p.op)              // the one focus entry point — stamps seen, runs the script
-        // Optimistically prune the tapped pill: focus() already stamped seenAt (so a
-        // freed pill's `unseen` is gone), and marking us "here" drops a working/waiting
-        // pill too, before the ~2s focus poll confirms it.
+        // Mark us "here" before the focus poll confirms it, so a waiting pill drops
+        // on the same reload that focus() runs (a freed pill drops off its stamp).
         if !p.surface.isEmpty { focusedSurface = p.surface }
-        updateSessionStrip()
+        focus(p.op)              // the one focus entry point — stamps seen, runs the script, re-derives
     }
 
     // Manually re-flag a finished row as unread (right-click → "Mark unread").
@@ -791,9 +800,10 @@ final class Store: ObservableObject {
     // dot and the dock tally come back. It then clears the organic way — the next
     // time that Ghostty tab is focused, pollFocusedSurface stamps seenAt = now —
     // exactly like a naturally-unseen result. No-op for running / external /
-    // surfaceless ops (nothing to rewind to).
+    // surfaceless ops (nothing to rewind to), and for a surface Ghostty says is
+    // gone (a dot no visit could ever clear — see surfaceReachable).
     func markUnread(_ op: Op) {
-        guard !op.surface.isEmpty, let end = op.endTs else { return }
+        guard surfaceReachable(op), let end = op.endTs else { return }
         seenAt[op.surface] = end - 1
         persistSeen()
         reload()
@@ -1198,6 +1208,23 @@ final class Store: ObservableObject {
         return tdev == -1
     }
 
+    // Can this op's recorded surface still be reached — jumped to by a click, and
+    // a visit to it witnessed by the focus poll? An agent's surface is a cached
+    // best-effort snapshot (see detached), so it can name a pane that's gone: a
+    // `--resume` in a new tab used to inherit the old tab's id, and every stamp on
+    // that id was pruned within 10s (pollLiveSurfaces), so the row's unseen dot and
+    // strip pill came back after every tap and ×. Judged against the last live-
+    // surface sample: absent from it AND started before it means gone; an op that
+    // started after the sample can't be judged (a tab born since isn't in it) and
+    // gets the benefit of the doubt; no sample yet (launch, automation denied)
+    // means we can't vouch, so nothing is raised. Both "unseen" and a strip pill
+    // are claims on your attention that only a reachable surface can retire, so
+    // both gate on this. A row itself never does — the process is its host.
+    private func surfaceReachable(_ op: Op) -> Bool {
+        guard !op.surface.isEmpty, let live = liveSurfaces else { return false }
+        return live.contains(op.surface) || op.start >= liveSurfacesAsOf.timeIntervalSince1970
+    }
+
     // Classifies what a tty's foreground is doing:
     //   .service       — fg process group holds a listening TCP socket
     //                    (yarn dev, vite, ...), regardless of activity
@@ -1284,14 +1311,22 @@ final class Store: ObservableObject {
     private func pollLiveSurfaces() {
         guard Date().timeIntervalSince(lastSurfacePoll) >= 10 else { return }
         lastSurfacePoll = Date()
+        let asOf = lastSurfacePoll
         DispatchQueue.global(qos: .utility).async {
             let ids = Self.fetchLiveSurfaceIds()
             DispatchQueue.main.async { [weak self] in
                 guard let self, let ids else { return }
+                let changed = ids != self.liveSurfaces
                 self.liveSurfaces = ids
+                self.liveSurfacesAsOf = asOf
                 // Forget seen-state for surfaces that no longer exist.
                 self.seenAt = self.seenAt.filter { ids.contains($0.key) }
                 self.persistSeen()
+                // The sample gates rows (the shell surface gate) and flags (unseen and
+                // strip pills, via surfaceReachable), so re-derive the moment it moves —
+                // the first sample after launch, a tab closed — rather than leaving the
+                // board on the old sample until the backstop.
+                if changed { self.reload() }
             }
         }
     }
@@ -1318,10 +1353,13 @@ final class Store: ObservableObject {
                     self.lastPersistedFocus = id
                     self.focusedSurface = id
                     self.persistSeen()
-                    // Drop that tab's pill the instant you land on it (your
-                    // dismissal is "I went there"), even when nothing is running to
-                    // otherwise trigger a reload.
-                    self.updateSessionStrip()
+                    // Re-derive now, even when nothing is running to otherwise
+                    // trigger a reload: the tab you landed on drops its pill the
+                    // instant you arrive (your dismissal is "I went there"), and the
+                    // one you left is judged on its stamps up to this moment — not
+                    // on the `unseen` the last reload snapshotted, which can predate
+                    // a stamp and briefly flag a result you were sitting on.
+                    self.reload()
                 }
             }
         }

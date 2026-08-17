@@ -79,6 +79,17 @@ fire "$(jq -cn --arg p "$NOTIF2" '{hook_event_name:"UserPromptSubmit",session_id
 check "completion emits subdone once" "$(grep '"id":"claude-s11"' "$LOG" | grep '"sub":"toolu_t1"' | grep -c '"subdone":true')" "1"
 check "marker cleared after drop" "$([[ -e $TMP/joystick/jagent-s11-toolu_t1 ]] && echo yes || echo no)" "no"
 
+# A session (re)start drops the sid-keyed surface cache: `claude --resume <sid>`
+# after the old tab closed lands the same sid in a NEW pane, and a cache left over
+# from the first incarnation would stamp the dead surface onto every later start
+# (a row you can't jump to or ever mark seen). Every source, startup included.
+print -r -- "DEADBEEF-0000" > "$TMP/joystick/surface-s40"
+fire '{"hook_event_name":"SessionStart","session_id":"s40","cwd":"/tmp","source":"resume"}'
+check "SessionStart resume drops surface cache" "$([[ -e $TMP/joystick/surface-s40 ]] && echo yes || echo no)" "no"
+print -r -- "DEADBEEF-0000" > "$TMP/joystick/surface-s41"
+fire '{"hook_event_name":"SessionStart","session_id":"s41","cwd":"/tmp","source":"startup"}'
+check "SessionStart startup drops surface cache" "$([[ -e $TMP/joystick/surface-s41 ]] && echo yes || echo no)" "no"
+
 # Drain-at-prompt backstop: a child whose completion <task-notification> landed in
 # the TRANSCRIPT (mid-turn, not delivered as its own prompt) is reconciled at the
 # NEXT prompt — clears the line without a timer, and only because the completion

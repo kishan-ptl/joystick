@@ -76,6 +76,10 @@ case $event in
     # conversation until your first prompt. startup is a fresh process (nothing
     # to retire), so skip it. The pid carries the match (the codex process is
     # unchanged across the rotation, and no two live processes share a pid).
+    # New incarnation, maybe a new pane (a resume after the old tab closed): drop
+    # the sid-keyed surface cache so the first prompt re-captures where you are —
+    # same reasoning as claude-hook.sh. Every source; startup has none.
+    rm -f "${LOG:h}/surface-$sid"
     src=$(jq -r '.source // empty' <<<"$input")
     case $src in clear|resume|compact) ;; *) exit 0 ;; esac
     cpid=$(codex_pid)

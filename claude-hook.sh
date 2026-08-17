@@ -245,6 +245,15 @@ case $event in
     # retire — so skip it.) The pid carries the match: the claude process is
     # unchanged across the rotation, and no two live processes share a pid. The
     # viewer's `case "reset"` runs the same supersede rule as a new `start`.
+    # A session (re)starting is a new incarnation, possibly in a different pane:
+    # `claude --resume <sid>` after its old tab closed lands the SAME sid in a
+    # NEW surface. The surface cache is keyed by sid and written once at the first
+    # prompt, so left alone it would keep stamping the dead surface onto every
+    # later start — a row the viewer can't aim a click at or ever mark seen. Drop
+    # it here (every source; startup has none, harmless) so the next prompt
+    # re-captures from the pane you're actually typing in — the pid cache below
+    # gets the same fresh-incarnation treatment.
+    rm -f "${LOG:h}/surface-$sid"
     src=$(jq -r '.source // empty' <<<"$input")
     case $src in clear|resume|compact) ;; *) exit 0 ;; esac
     cpid=$(claude_pid)
