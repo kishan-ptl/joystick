@@ -749,6 +749,71 @@ dropped them at the resume); their next prompt re-captures. Residual: the row's
 right-click "Mark unread" still shows on a known-gone row and is inert there (the
 menubar row has no store to ask) — rare now that the source is fixed.
 
+## Island pins — hold a row on the strip through every state (2026-09-03)
+
+Kishan's ask: the strip pill for a session that finished or needs him is great, but
+sometimes he wants one *while it's working* — its context updating as it goes, still
+clearly showing when it completes — and to be able to move the pills around.
+
+- **A pin is "I'm watching this one."** `Store.pinned` (a Set of group keys,
+  persisted as `islandPins` in UserDefaults like the queue — app-owned intent, never
+  in the log). A pinned row holds a pill through every state; the auto rules (agents
+  only, stopped-and-your-move, not the tab you're in, surface reachable) apply only
+  to un-pinned pills. A pinned pill stays put when you're in its tab — the pin makes
+  it a fixture, not a flag — and skips the surface gate (you asked for it; a tap
+  makes the row's own offer, surface else cwd). Any row can be pinned, shells too,
+  so the pill grew the serving / running-shell / bg-ring glyphs to say so.
+- **Lives exactly as long as its row.** Pruned against the board on every reload:
+  closing the tab (or the session process dying) drops the pin with the row —
+  principle #1, the pin never keeps a dead session on the strip. `/clear` rotates
+  the session id, so a pin doesn't survive that either.
+- **Working context on the pill** mirrors the row's subtitle: a lone subagent by
+  name, a fan-out by count, else the tool in use (`⚙ Bash: …`), else the goal, else
+  "working…". The elapsed time is its own `Text` with `layoutPriority(1)` so the
+  activity truncates and the time never does (the first cut appended it to the
+  blurb string, and it was the first thing to vanish). Stopped: the bg-work
+  segments lead, then Claude's closing blurb.
+- **Completion is loud once, then still**: spinner → ✓/✗ through a scale+opacity
+  transition, the blue unseen dot appears on the name line (the board's own
+  vocabulary), and the border glows once (0.95 → 0.16 over ~1.5s, on
+  `onChange(of: p.working)`). A one-shot, not a pulse — the pulse belongs to
+  needs-you.
+- **Three ways to pin**: row right-click → Pin to island (window only, beside Move
+  Up/Down); ⌘P on the selected row (footer hint updated); or hover any pill → its
+  pin glyph (an outline on an auto pill — "this one, keep it" without a trip to the
+  window — gold-filled on a pinned one; gold is the window's own pin grammar, and
+  the row shows a small gold pin beside its queue chip). The × keeps its meaning and
+  shows only when there's a wait/unread to clear.
+- **Drag to reorder — and it works here where it couldn't in the window.** ONE
+  `DragGesture(minimumDistance: 0, coordinateSpace: .global)` per pill does both
+  click and drag: release without travel (≤4pt) = tap → focus; travel = pick the
+  pill up, re-deal the others live as it crosses slots (`deal`), commit on release
+  (`onReorder`). No tap-vs-drag arbitration and no NSTableView in the loop — the
+  two things that killed the window's drag (2026-06-15). The global coordinate
+  space is load-bearing: the gesture rides on the very view being offset and
+  re-dealt, so a local translation measures against a moving origin and wanders
+  (first cut: 200 → 44 → 326 mid-drag, no reorder). The controller holds incoming
+  layouts while `model.dragging` (a 1 Hz reload mid-drag must not snap the order
+  back under the cursor) and re-arms on `onDragEnd`. Right-click → Move Left/Right
+  is the no-drag path.
+- **One order, not two.** The strip's order IS the window's slot order (a pill sits
+  where its row sits), so a strip drag goes through the same re-deal as ⌘↑/⌘↓ —
+  `applyVisibleOrder(seq)`, factored out of `moveRow`: the dragged pills' slots are
+  handed out in the new order, every other row keeps its exact slot. Considered and
+  declined: a separate pinned-first strip order (two orders to explain, and pinned
+  pills would still shift as auto pills came and went, since the strip is centred).
+  Pinned pills take the screen cap first; auto pills fold into "+k".
+- Verified on a throwaway build driven by `cliclick`: ⌘P pinned this very session
+  mid-turn (pill: "⚙ Bash: cat > /p… · 15m36s"), a drag swapped the two pills and
+  persisted `slotOrder`, a tap focused Ghostty, the pill's pin toggled `islandPins`,
+  the context menu rendered with Move Left disabled on the first pill.
+
+Testing gotcha worth keeping: a throwaway build shares UserDefaults with the live
+app (bundle id), so both windows restore to the SAME autosaved frame and the live
+one can be the one you screenshot — move the throwaway's window via System Events
+first. Its strip also overlaps the live strip exactly; the pinned pill's gold pin
+is how you tell them apart.
+
 ## Roadmap
 
 ### v0.1 — shareable (1–2 weekends)
