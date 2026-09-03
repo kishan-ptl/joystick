@@ -33,6 +33,13 @@ shared state and doubles as the future integration API.
   row's right-click "Move up/down") — while the menubar popover keeps the
   prioritized waiting-on-top sort. The window's fixed order is deliberate, not a
   regression of the sort; see NOTES.md "Keyboard-first window (2026-06-14)".
+  The app also owns the **session strip** (the "island"): a top-center HUD of
+  frosted pills, one per agent session that's waiting or finished-unseen, in the
+  window's slot order. Any row can be **pinned** there (⌘P, right-click → Pin to
+  island, or the pill's pin glyph) to hold its pill through every state — live
+  activity while it works, a one-shot glow + ✓ and the unseen dot when it stops.
+  Pills drag to reorder (one order: the window's slots). Pins live in
+  `Store.pinned` (UserDefaults, app-owned like the queue) and die with their row.
   (A SwiftBar python plugin was the original menubar; retired 2026-06-13 —
   recoverable from git history if ever needed.)
 - **Interaction** — `joystick-focus.sh` (AppleScript): click a row → focus that

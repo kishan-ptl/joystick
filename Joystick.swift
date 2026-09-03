@@ -86,6 +86,14 @@ final class Store: ObservableObject {
     // HAPPENED, never a record of what you intend). The compose bar (composing,
     // below) edits these; they render inline under each row.
     @Published var queues: [String: [QueuedPrompt]] = [:]
+    // Island pins: group keys you've pinned to the session strip (the top-center
+    // "island"). An auto pill only appears once a session stops and it's your move;
+    // a pinned row holds a pill through EVERY state — working (its live activity
+    // ticking as it goes), waiting, done — and stays put when you land on its tab,
+    // so you can watch one from anywhere. App-owned intent like the queue: persisted
+    // to UserDefaults, never in the log. Lives exactly as long as its row (closing
+    // the session is the dismissal) — see reload() and updateSessionStrip().
+    @Published var pinned: Set<String> = []
     // composing = the compose bar is open; it targets the currently selectedKey
     // row, so arrows keep navigating (and just re-aim the bar) instead of trapping
     // you. composeDraft is the prompt being typed. Both window-only; the bar
@@ -189,6 +197,7 @@ final class Store: ObservableObject {
            let q = try? JSONDecoder().decode([String: [QueuedPrompt]].self, from: data) {
             queues = q
         }
+        pinned = Set(UserDefaults.standard.stringArray(forKey: "islandPins") ?? [])
         commandsToday = UserDefaults.standard.integer(forKey: "commandsToday")
         tallyDayStart = UserDefaults.standard.double(forKey: "tallyDayStart")
         refreshWiring()
@@ -650,6 +659,11 @@ final class Store: ObservableObject {
         slotOrder.insert(contentsOf: fresh, at: 0)
         if slotOrder != prevSlots { persistSlotOrder() }
         orderedGroups = slotOrder.compactMap { bySurface[$0] }.map(withMeta)
+        // A pin lives exactly as long as its row: once the session's host is gone the
+        // key drops off the board and the pin goes with it (principle #1 — closing
+        // the tab is the dismissal; a pin never keeps a dead session on the strip).
+        let keptPins = pinned.filter { present.contains($0) }
+        if keptPins != pinned { pinned = keptPins; persistPins() }
 
         // Keep the keyboard cursor on a still-visible row as terminals come and go.
         ensureSelection()
@@ -742,21 +756,36 @@ final class Store: ObservableObject {
         reload()
     }
 
-    // Drive the top-center session strip. Membership is derived fresh every call
-    // (no edge state): a session surfaces only once it STOPS working and it's your
-    // move — each agent group whose tab you're NOT currently sitting in earns a pill iff it is
-    //   · waiting  (blocked, needs your move), or
-    //   · freed & unseen (finished but not yet jumped to — the seen model).
-    // A still-grinding session is deliberately absent (that churn is distracting); it
-    // appears when it's done. Idle-and-already-seen sessions drop off. Order is the
-    // window's own slot order (orderedGroups), so a pill sits where its row sits. Cap
-    // by how many fit across the screen; the rest fold into a "+k" pill that summons
-    // the window. Called at the end of every reload and on each focus change (main-thread).
+    // Drive the top-center session strip (the "island"). Membership is derived fresh
+    // every call (no edge state). Two ways onto it:
+    //   · by itself — an agent group whose tab you're NOT sitting in earns a pill iff
+    //     it is waiting (blocked, needs your move) or freed & unseen (finished but not
+    //     yet jumped to — the seen model). A still-grinding session is deliberately
+    //     absent (that churn is distracting); it appears when it's done, and drops the
+    //     moment you land on its tab.
+    //   · by hand — a PINNED group (any kind, shells too) holds a pill through every
+    //     state: its live activity ticks while it works, the glyph flips to ✓/✗ (plus
+    //     the blue unseen dot) when it stops, and it stays put even while you're in
+    //     its tab — the pin is your standing "I'm watching this one", so the pill is a
+    //     fixture, not a flag. Only closing the session (or unpinning) takes it off.
+    //     It also skips the surface gate below: you asked for it, so it shows, and a
+    //     tap makes the row's own offer (surface, else the cwd fallback).
+    // Order is the window's own slot order (orderedGroups), so a pill sits where its
+    // row sits — and a drag on the strip re-deals those same slots (reorderStrip). Cap
+    // by how many fit across the screen: pinned pills take the cap first, the rest
+    // fold into a "+k" pill that summons the window. Called at the end of every
+    // reload and on each focus change (main-thread).
     private func updateSessionStrip() {
         let focused = focusedSurface ?? ""
+        let nowTs = now.timeIntervalSince1970
         var pills: [SessionPreview] = []
-        for g in orderedGroups where g.current.isAgent {
+        for g in orderedGroups {
             let o = g.current
+            if pinned.contains(g.key) {
+                pills.append(SessionPreview(g, nowTs: nowTs, pinned: true))
+                continue
+            }
+            guard o.isAgent else { continue }
             // The tab you're already in isn't on the strip — you're there.
             if !focused.isEmpty && o.surface == focused { continue }
             // A pill's whole job is "click to get back there", so one we can't aim
@@ -769,21 +798,27 @@ final class Store: ObservableObject {
             // earn a place on the strip.
             if !surfaceReachable(o) { continue }
             if o.isWaiting || o.unseen {
-                pills.append(SessionPreview(g))
+                pills.append(SessionPreview(g, nowTs: nowTs, pinned: false))
             }
         }
 
         if pills.isEmpty { strip.hide(); return }
 
         // How many whole pills fit across the usable width (leave a margin); the
-        // overflow collapses into one trailing "+k" pill.
+        // overflow collapses into one trailing "+k" pill. Pinned pills never fold
+        // away — you asked for them — so they claim the cap first and the auto pills
+        // fill what's left, everything staying in slot order.
         let screenW = NSScreen.main?.visibleFrame.width ?? 1440
         let cap = max(2, Int((screenW - 80) / 250))
-        let overflow = max(0, pills.count - cap)
-        let shown = Array(pills.prefix(cap))
+        var keep = Set(pills.filter(\.pinned).prefix(cap).map(\.key))
+        for p in pills where !p.pinned && keep.count < cap { keep.insert(p.key) }
+        let shown = pills.filter { keep.contains($0.key) }
+        let overflow = pills.count - shown.count
         strip.show(shown, overflow: overflow,
                    onTap: { [weak self] p in self?.focusFromStrip(p) },
                    onClear: { [weak self] p in self?.clearRow(p.op) },
+                   onPin: { [weak self] p in self?.togglePin(p.key) },
+                   onReorder: { [weak self] keys in self?.reorderStrip(keys) },
                    onOverflow: { Summoner.shared.summon() })
     }
 
@@ -792,6 +827,42 @@ final class Store: ObservableObject {
         // on the same reload that focus() runs (a freed pill drops off its stamp).
         if !p.surface.isEmpty { focusedSurface = p.surface }
         focus(p.op)              // the one focus entry point — stamps seen, runs the script, re-derives
+    }
+
+    // MARK: - Island pins
+
+    // Pin/unpin a row to the strip. Only a row on the board can be pinned (the strip
+    // is a mirror — a pin for a key that isn't there would be a wish, not a fact).
+    // Re-lays the strip at once so the pill lands on the same click.
+    func togglePin(_ key: String) {
+        if pinned.contains(key) {
+            pinned.remove(key)
+        } else if orderedGroups.contains(where: { $0.key == key }) {
+            pinned.insert(key)
+        } else {
+            return
+        }
+        persistPins()
+        updateSessionStrip()
+    }
+
+    // ⌘P — pin/unpin the row under the keyboard cursor.
+    func togglePinSelection() {
+        guard let key = selectedKey else { return }
+        togglePin(key)
+    }
+
+    // A drag (or Move Left/Right) on the strip landed: `keys` is the strip's pills in
+    // their new left-to-right order. The strip's order IS the window's slot order — a
+    // pill sits where its row sits — so this is the same re-deal as ⌘↑/⌘↓: those
+    // pills' slots are handed out in the new order, every other row keeps its slot.
+    func reorderStrip(_ keys: [String]) {
+        applyVisibleOrder(keys)
+        updateSessionStrip()
+    }
+
+    private func persistPins() {
+        UserDefaults.standard.set(pinned.sorted(), forKey: "islandPins")
     }
 
     // Manually re-flag a finished row as unread (right-click → "Mark unread").
@@ -966,20 +1037,28 @@ final class Store: ObservableObject {
         let vj = ((vi + delta) % vis.count + vis.count) % vis.count   // wrap both ends
         vis.remove(at: vi)
         vis.insert(key, at: vj)
-        // Stitch the reordered visible sequence back into slotOrder: at each slot
-        // that holds a visible key, drop in the next key from the new order; the
-        // hidden ones keep their exact slots. (Counts match — every visible key is
-        // in slotOrder exactly once — so the iterator never runs dry.)
-        let visibleSet = Set(vis)
-        var next = vis.makeIterator()
-        slotOrder = slotOrder.map { visibleSet.contains($0) ? next.next()! : $0 }
-        persistSlotOrder()
-        // Re-sort the rendered list to the new slotOrder now, rather than waiting
-        // for the next reload() — same groups, just reindexed by the new order.
-        let byKey = Dictionary(orderedGroups.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })
-        orderedGroups = slotOrder.compactMap { byKey[$0] }
+        applyVisibleOrder(vis)
         selectedKey = key
         return true
+    }
+
+    // Re-deal a subsequence of slots. `seq` is some subset of the board's keys in the
+    // order you want them (the filtered window list, or the strip's pills): at each
+    // slot that holds one of them, drop in the next key from `seq`; every other row
+    // (filtered out, or not on the strip) keeps its exact slot. Keys that have since
+    // left the board are ignored, so the counts always match and the iterator never
+    // runs dry. Persists, and re-sorts the rendered list now rather than waiting for
+    // the next reload() — same groups, just reindexed by the new order.
+    private func applyVisibleOrder(_ seq: [String]) {
+        let slots = Set(slotOrder)
+        let seq = seq.filter { slots.contains($0) }
+        let set = Set(seq)
+        guard set.count == seq.count else { return }
+        var next = seq.makeIterator()
+        slotOrder = slotOrder.map { set.contains($0) ? next.next()! : $0 }
+        persistSlotOrder()
+        let byKey = Dictionary(orderedGroups.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })
+        orderedGroups = slotOrder.compactMap { byKey[$0] }
     }
 
     @discardableResult
@@ -1921,6 +2000,9 @@ struct GroupRow: View {
     var clearRow: (Op) -> Void = { _ in }
     var canReorder: Bool = false   // window nav, >1 row — gates "Move up/down"
     var moveRow: (Int) -> Void = { _ in }   // -1 = up, +1 = down
+    // Island pin (window only): pinned rows hold a strip pill through every state.
+    var isPinned: Bool = false
+    var togglePin: () -> Void = {}
     // Prompt queue (window only). store drives capture/dispatch; queue is the
     // parked prompts shown inline under the row. The menubar leaves these
     // nil/false/empty so it stays a calm needs-you glance.
@@ -2125,7 +2207,18 @@ struct GroupRow: View {
         // first-mouse handling — so clicking it opens the composer instead of
         // jumping to the tab, whether or not Joystick is focused.
         .overlay(alignment: .topTrailing) {
-            if queueEnabled, store != nil { queueChipView }
+            HStack(spacing: 2) {
+                // Which rows are on the island: a small gold pin (the window's own
+                // pin grammar), passive — unpin via the menu, ⌘P, or the pill.
+                if isPinned {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.summaryYellow.opacity(0.85))
+                        .padding(.top, 3)
+                        .allowsHitTesting(false)
+                }
+                if queueEnabled, store != nil { queueChipView }
+            }
         }
         .help("Click to focus this tab in Ghostty · right-click to copy")
         .contextMenu {
@@ -2167,6 +2260,13 @@ struct GroupRow: View {
                     .disabled(!canReorder)
                 Button { moveRow(1) } label: { Label("Move Down", systemImage: "arrow.down") }
                     .disabled(!canReorder)
+                // Pin to the island: hold this row's pill on the top-center strip
+                // through every state (working, waiting, done) — see Store.pinned.
+                Divider()
+                Button { togglePin() } label: {
+                    Label(isPinned ? "Unpin from island" : "Pin to island",
+                          systemImage: isPinned ? "pin.slash" : "pin")
+                }
             }
             // "Clear" and "Mark unread" are inverses and never both apply: a row
             // is either flagging something to clear, or already clear (markable).
@@ -2526,7 +2626,7 @@ struct ContentView: View {
     private var hintFooter: some View {
         Text(store.showDigest
              ? "⌘C copy · esc back"
-             : "↑↓ move · ⏎ focus · ⌘K queue · ⌘↑↓ reorder · ⌘1–9 jump · esc close")
+             : "↑↓ move · ⏎ focus · ⌘K queue · ⌘P pin · ⌘↑↓ reorder · ⌘1–9 jump · esc close")
             .font(.system(.caption2))
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2771,6 +2871,8 @@ struct ContentView: View {
                  clearRow: { store.clearRow($0) },
                  canReorder: keyboardNav && store.visibleGroups.count > 1,
                  moveRow: { store.moveRow(g.key, $0) },
+                 isPinned: keyboardNav && store.pinned.contains(g.key),
+                 togglePin: { store.togglePin(g.key) },
                  store: store,
                  // Queue is a window thing; external rows (CI/webhooks) have no tab
                  // to paste into, so no chip there.
@@ -2855,6 +2957,10 @@ struct ContentView: View {
                 }
                 if flags == .command, let ch = event.charactersIgnoringModifiers, ch == "y" {
                     store.toggleDigest()   // ⌘Y — the Today recap (digest mode above handles closing)
+                    return true
+                }
+                if flags == .command, let ch = event.charactersIgnoringModifiers, ch == "p" {
+                    store.togglePinSelection()   // ⌘P — pin/unpin the selected row to the island
                     return true
                 }
                 if flags == .command, let ch = event.charactersIgnoringModifiers,
@@ -3270,9 +3376,9 @@ enum StripMetrics {
     static let topGap: CGFloat = 6   // clearance below the menubar
 }
 
-// A value snapshot of one agent session shown as a pill — decoupled from the live
-// fold, and Equatable so the controller skips redundant redraws while the same set
-// of sessions sits in the same state.
+// A value snapshot of one terminal shown as a pill — decoupled from the live fold,
+// and Equatable so the controller skips redundant redraws while the same set of
+// sessions sits in the same state. Agent sessions by default; any row once pinned.
 struct SessionPreview: Equatable, Identifiable {
     let key: String
     let surface: String
@@ -3280,46 +3386,93 @@ struct SessionPreview: Equatable, Identifiable {
     let blurb: String
     let worktree: String   // linked-worktree leaf ("" for the main checkout)
     let dir: String        // cwd's directory name — the "where" when not a worktree
+    let isAgent: Bool      // Claude/Codex session (vs a pinned shell command)
     let isCodex: Bool       // agent kind, which picks the working spinner (frames + tint)
     let working: Bool      // running, not blocked
     let waiting: Bool      // blocked, your move
+    let serving: Bool      // a shell hosting a service (listening socket)
+    let liveBg: Bool       // turn done, but bg shells/subagents it launched still run
     let failed: Bool       // finished non-zero
+    let unseen: Bool       // finished, not yet visited — the board's blue dot
+    let pinned: Bool       // held here by hand, through every state
+    let elapsed: String    // running time so far ("" when stopped, or a service)
     let op: Op             // for focus() on tap
 
     var id: String { key }
 
-    init(_ g: SurfaceGroup) {
+    init(_ g: SurfaceGroup, nowTs: Double, pinned: Bool) {
         let o = g.current
         key = g.key
         surface = o.surface
-        let picked = !o.sessionName.isEmpty ? o.sessionName
+        // An agent's name is its rename / goal / topic, falling back to the
+        // directory; a pinned shell's is the command itself (its row's label).
+        let picked: String
+        if o.isAgent {
+            picked = !o.sessionName.isEmpty ? o.sessionName
                    : !o.goal.isEmpty ? o.goal
                    : !o.title.isEmpty ? o.title
                    : (o.cwd as NSString).lastPathComponent
-        name = picked.isEmpty ? (o.isCodex ? "Codex" : "Claude") : picked
+        } else {
+            picked = o.cmd
+        }
+        name = picked.isEmpty ? (o.isCodex ? "Codex" : o.isClaude ? "Claude" : "shell") : picked
         worktree = o.worktree
         dir = (o.cwd as NSString).lastPathComponent
+        isAgent = o.isAgent
         isCodex = o.isCodex
         working = o.isRunning && !o.isWaiting
         waiting = o.isWaiting
+        serving = o.isService
+        liveBg = !o.isRunning && !(o.bgShells.isEmpty && o.liveSubagents.isEmpty)
         failed = !o.isRunning && (o.exitCode ?? 0) != 0
+        unseen = o.unseen
+        self.pinned = pinned
         if o.isWaiting {
-            blurb = (o.waitingMsg?.isEmpty == false) ? o.waitingMsg! : "waiting for you"
+            blurb = (o.waitingMsg?.isEmpty == false) ? o.waitingMsg!
+                  : o.waitingSince != nil ? "waiting for you" : "waiting for input?"
+            elapsed = ""
         } else if o.isRunning {
-            // Working: the goal (if set and not already the name) is the richest
-            // "what is this doing" — otherwise a plain live marker.
-            blurb = (!o.goal.isEmpty && o.goal != picked) ? o.goal : "working…"
-        } else if let s = o.summary, !s.isEmpty {
-            blurb = s
+            // Working: what it's doing RIGHT NOW, the way the row's subtitle says it
+            // (a lone subagent by name, a fan-out by count, else the tool in use),
+            // then the goal, then a plain marker. The elapsed time rides alongside
+            // (`elapsed`, laid out so it never truncates away), so a pinned pill
+            // answers "how long has this been going" at a glance. A service has no
+            // end to count toward, so it shows its ports instead.
+            let live: String
+            if o.liveSubagents.count == 1 {
+                live = "⚙ " + o.liveSubagents[0].label
+            } else if o.liveSubagents.count >= 2 {
+                live = "⚙ \(o.liveSubagents.count) agents running"
+            } else if let act = o.activity, !act.isEmpty {
+                live = "⚙ " + act
+            } else if o.isService {
+                live = o.ports.isEmpty ? "serving" : "serving " + o.ports.map { ":\($0)" }.joined(separator: " ")
+            } else if !o.goal.isEmpty && o.goal != picked {
+                live = o.goal
+            } else {
+                live = o.isAgent ? "working…" : "running"
+            }
+            blurb = live
+            elapsed = o.isService ? "" : fmt(nowTs - o.start)
         } else {
-            blurb = (o.exitCode ?? 0) != 0 ? "finished with errors" : "done"
+            // Stopped: the bg work still going (if any) leads, then Claude's closing
+            // blurb, else a plain verdict.
+            var segs: [String] = []
+            if !o.liveSubagents.isEmpty { segs.append("⟳ \(o.liveSubagents.count) bg") }
+            if !o.bgShells.isEmpty { segs.append("▷ \(o.bgShells.count) shell\(o.bgShells.count == 1 ? "" : "s")") }
+            if let s = o.summary, !s.isEmpty { segs.append(s) }
+            else { segs.append((o.exitCode ?? 0) != 0 ? "finished with errors" : "done") }
+            blurb = segs.joined(separator: " · ")
+            elapsed = ""
         }
         op = o
     }
 
     static func == (a: SessionPreview, b: SessionPreview) -> Bool {
         a.key == b.key && a.working == b.working && a.waiting == b.waiting
-            && a.failed == b.failed && a.name == b.name && a.blurb == b.blurb
+            && a.serving == b.serving && a.liveBg == b.liveBg && a.failed == b.failed
+            && a.unseen == b.unseen && a.pinned == b.pinned
+            && a.name == b.name && a.blurb == b.blurb && a.elapsed == b.elapsed
             && a.worktree == b.worktree && a.dir == b.dir
     }
 }
@@ -3329,8 +3482,15 @@ struct SessionPreview: Equatable, Identifiable {
 final class StripModel: ObservableObject {
     @Published var previews: [SessionPreview] = []
     @Published var overflow: Int = 0
+    // A pill is in hand (drag-to-reorder). The view re-deals `previews` live while
+    // it lasts, and the controller holds any incoming layout until it ends — a
+    // reload mid-drag must not snap the order back under the cursor.
+    var dragging = false
     var onTap: (SessionPreview) -> Void = { _ in }
     var onClear: (SessionPreview) -> Void = { _ in }
+    var onPin: (SessionPreview) -> Void = { _ in }
+    var onReorder: ([String]) -> Void = { _ in }   // pills' keys, new left-to-right order
+    var onDragEnd: () -> Void = {}
     var onOverflow: () -> Void = {}
 }
 
@@ -3357,19 +3517,29 @@ struct DirChip: View {
 }
 
 // One frosted capsule per in-flight session: the state glyph (reusing the row's own
-// vocabulary — breathing gold = needs you, the agent's own spinner = working, ✓/✗ = result),
-// the session name + a "where" chip (worktree branch, else directory), and the last
-// thing it said. A click focuses the tab.
+// vocabulary — breathing gold = needs you, the agent's own spinner = working, ✓ in a
+// turning ring = done with bg work still going, ✓/✗ = result, blue dot = unseen), the
+// session name + a "where" chip (worktree branch, else directory), and the last thing
+// it said. The click/drag lives on the strip (SessionStripView), which owns the order;
+// this view owns its own hover chrome and the one-shot glow when its session stops.
 struct SessionPill: View {
     let p: SessionPreview
-    let onTap: () -> Void
+    var canMoveLeft = false
+    var canMoveRight = false
     let onClear: () -> Void
+    let onPin: () -> Void
+    let onMove: (Int) -> Void     // -1 = left, +1 = right
     @State private var hovering = false
+    @State private var glow = false
+
+    private var agentTint: Color { p.isCodex ? .codexTeal : .claudeOrange }
 
     // Border accent per state — the glyph carries the motion, this is a quiet tint.
     private var accent: Color {
         if p.waiting { return Color(hex: 0xFFC107) }
-        if p.working { return p.isCodex ? .codexTeal : .claudeOrange }
+        if p.serving { return .servingGreen }
+        if p.working { return p.isAgent ? agentTint : .blue }
+        if p.liveBg && !p.failed { return agentTint }
         if p.failed  { return Color(red: 0.86, green: 0.30, blue: 0.27) }
         return .servingGreen
     }
@@ -3377,8 +3547,20 @@ struct SessionPill: View {
     @ViewBuilder private var glyph: some View {
         if p.waiting {
             WaitingLight()                                        // soft gold breathing = needs you
-        } else if p.working {
+        } else if p.serving {
+            Image(systemName: "antenna.radiowaves.left.and.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.servingGreen)
+                .frame(width: 16, height: 16)
+        } else if p.working && p.isAgent {
             AgentThinkingIcon(isCodex: p.isCodex)                  // that agent's own spinner = working
+        } else if p.working {
+            Image(systemName: "play.circle.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.blue)
+                .frame(width: 16, height: 16)
+        } else if p.liveBg && !p.failed {
+            BackgroundRingCheck(tint: agentTint)                  // done, bg shells/agents still running
         } else if p.failed {
             Image(systemName: "xmark.circle.fill")
                 .font(.system(size: 13, weight: .semibold))
@@ -3395,8 +3577,15 @@ struct SessionPill: View {
     var body: some View {
         HStack(spacing: 9) {
             glyph
+                // The state flip (spinner → ✓) is the pill's headline event, so let the
+                // glyphs cross-fade and pop instead of swapping on one frame.
+                .id(p.waiting ? "w" : p.working ? "r" : p.liveBg ? "b" : p.failed ? "x" : "ok")
+                .transition(.scale(scale: 0.4).combined(with: .opacity))
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
+                    if p.unseen {
+                        Circle().fill(Color.blue).frame(width: 6, height: 6)   // the board's unseen dot
+                    }
                     Text(p.name)
                         .font(.system(size: 12.5, weight: .semibold))
                         .foregroundStyle(.white)
@@ -3407,28 +3596,58 @@ struct SessionPill: View {
                         DirChip(name: p.dir)
                     }
                 }
-                Text(p.blurb)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.62))
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(p.blurb)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.62))
+                        .lineLimit(1)
+                    if !p.elapsed.isEmpty {
+                        Text("· " + p.elapsed)
+                            .font(.system(size: 11).monospacedDigit())
+                            .foregroundStyle(.white.opacity(0.45))
+                            .lineLimit(1)
+                            .layoutPriority(1)   // the time keeps its width; the activity truncates
+                    }
+                }
             }
             Spacer(minLength: 0)
-            // The way off the strip that isn't "go there". A pill is a claim on your
-            // attention floating over every window, so it needs an answer for "not
-            // now" that doesn't cost you a tab switch — but this is an acknowledgement,
-            // NOT a dismissal: it's the row's own right-click Clear (see clearRow),
-            // which retires only the wait/unread that's showing. The next thing this
-            // session does raises a fresh pill. Quiet at rest, lit on hover.
-            Button(action: onClear) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(.white.opacity(hovering ? 0.85 : 0.3))
-                    .frame(width: 18, height: 18)
-                    .contentShape(Rectangle())
+            HStack(spacing: 0) {
+                // The way off the strip that isn't "go there". A pill is a claim on your
+                // attention floating over every window, so it needs an answer for "not
+                // now" that doesn't cost you a tab switch — but this is an acknowledgement,
+                // NOT a dismissal: it's the row's own right-click Clear (see clearRow),
+                // which retires only the wait/unread that's showing. The next thing this
+                // session does raises a fresh pill. Quiet at rest, lit on hover. A pinned
+                // pill mid-work has nothing to clear, so no × there.
+                if p.waiting || p.unseen {
+                    Button(action: onClear) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.white.opacity(hovering ? 0.85 : 0.3))
+                            .frame(width: 18, height: 18)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear — leave it, don't switch")
+                }
+                // The pin: gold and always showing on a pinned pill (that's how you
+                // know why it's here), invisible until hover on an auto pill — where a
+                // click says "this one, keep it" without a trip to the window.
+                Button(action: onPin) {
+                    Image(systemName: p.pinned ? "pin.fill" : "pin")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(p.pinned
+                                         ? Color.summaryYellow.opacity(hovering ? 1 : 0.75)
+                                         : Color.white.opacity(hovering ? 0.6 : 0))
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(p.pinned ? "Unpin from island" : "Pin to island — keep it here through every state")
             }
-            .buttonStyle(.plain)
-            .help("Clear — leave it, don't switch")
         }
+        .animation(.spring(duration: 0.35), value: p.working)
+        .animation(.spring(duration: 0.35), value: p.waiting)
         .onHover { hovering = $0 }
         .padding(.horizontal, 12)
         .frame(width: StripMetrics.pillW, height: StripMetrics.pillH, alignment: .leading)
@@ -3436,11 +3655,38 @@ struct SessionPill: View {
         .clipShape(RoundedRectangle(cornerRadius: StripMetrics.corner, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: StripMetrics.corner, style: .continuous)
-                .strokeBorder(accent.opacity(p.waiting ? 0.5 : 0.16), lineWidth: 1)
+                .strokeBorder(accent.opacity(glow ? 0.95 : p.waiting ? 0.5 : 0.16), lineWidth: glow ? 1.5 : 1)
         )
         .contentShape(RoundedRectangle(cornerRadius: StripMetrics.corner, style: .continuous))
-        .onTapGesture { onTap() }
+        .contextMenu {
+            Button { onPin() } label: {
+                Label(p.pinned ? "Unpin from island" : "Pin to island",
+                      systemImage: p.pinned ? "pin.slash" : "pin")
+            }
+            Divider()
+            Button { onMove(-1) } label: { Label("Move Left", systemImage: "arrow.left") }
+                .disabled(!canMoveLeft)
+            Button { onMove(1) } label: { Label("Move Right", systemImage: "arrow.right") }
+                .disabled(!canMoveRight)
+            if p.waiting || p.unseen {
+                Divider()
+                Button { onClear() } label: {
+                    Label(p.waiting ? "Clear" : "Mark as read", systemImage: p.waiting ? "bell.slash" : "circle")
+                }
+            }
+        }
         .help("Jump to \(p.name) in Ghostty")
+        // The moment a pill's session stops working: one glow on the border (up in
+        // a blink, gone over ~1.5s) so the flip from spinner to ✓ can't slip past in
+        // the corner of your eye. Once, then still — a repeating pulse belongs to
+        // "needs you" (the waiting light), and this is a result, not a request.
+        .onChange(of: p.working) { was, now in
+            guard was, !now else { return }
+            withAnimation(.easeIn(duration: 0.12)) { glow = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                withAnimation(.easeOut(duration: 1.4)) { glow = false }
+            }
+        }
     }
 }
 
@@ -3468,13 +3714,35 @@ struct OverflowPill: View {
 
 // The strip: pills laid left-to-right, evenly spaced, over a clear panel (the gaps
 // show the desktop through). Forced dark so the reused grey chips read on the HUD.
+//
+// Owns the pointer: ONE gesture per pill does both click and drag. A press that
+// lifts without travelling is the tap (focus that tab); one that moves picks the
+// pill up and slides it along the row, re-dealing the others live as it crosses
+// their slots, and commits the new order on release (onReorder → the window's slot
+// order, so the row moves with it). One gesture rather than tap + drag arbitration:
+// the window's drag-to-reorder died on exactly that fight (NOTES.md 2026-06-15),
+// and here there's no NSTableView in the loop to starve — it's our own HStack.
 struct SessionStripView: View {
     @ObservedObject var model: StripModel
+    // The pill in hand, the slot it was picked up from, and its offset from its
+    // CURRENT slot (the list is re-dealt under it as it crosses slots).
+    @State private var dragKey: String? = nil
+    @State private var dragFrom = 0
+    @State private var dragX: CGFloat = 0
+    private let step = StripMetrics.pillW + StripMetrics.gap
 
     var body: some View {
         HStack(spacing: StripMetrics.gap) {
-            ForEach(model.previews) { p in
-                SessionPill(p: p, onTap: { model.onTap(p) }, onClear: { model.onClear(p) })
+            ForEach(Array(model.previews.enumerated()), id: \.element.id) { i, p in
+                SessionPill(p: p,
+                            canMoveLeft: i > 0,
+                            canMoveRight: i < model.previews.count - 1,
+                            onClear: { model.onClear(p) },
+                            onPin: { model.onPin(p) },
+                            onMove: { nudge(p.key, by: $0) })
+                    .offset(x: p.key == dragKey ? dragX : 0)
+                    .zIndex(p.key == dragKey ? 1 : 0)
+                    .gesture(pressOrDrag(p))
             }
             if model.overflow > 0 {
                 OverflowPill(count: model.overflow) { model.onOverflow() }
@@ -3483,6 +3751,65 @@ struct SessionStripView: View {
         .environment(\.colorScheme, .dark)
         .fixedSize()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func index(of key: String) -> Int? {
+        model.previews.firstIndex { $0.key == key }
+    }
+
+    // Re-deal the live order so `key` sits at `target`; no commit (the drag's end,
+    // or the menu, does that).
+    private func deal(_ key: String, to target: Int) {
+        guard let cur = index(of: key), target != cur,
+              (0..<model.previews.count).contains(target) else { return }
+        withAnimation(.spring(duration: 0.28)) {
+            let p = model.previews.remove(at: cur)
+            model.previews.insert(p, at: target)
+        }
+    }
+
+    // Right-click → Move Left/Right: one slot over, committed at once.
+    private func nudge(_ key: String, by delta: Int) {
+        guard let cur = index(of: key) else { return }
+        deal(key, to: cur + delta)
+        model.onReorder(model.previews.map(\.key))
+    }
+
+    private func pressOrDrag(_ p: SessionPreview) -> some Gesture {
+        // Global space, deliberately: the gesture rides on the very view we offset
+        // and re-deal as it moves, so a local translation would measure against a
+        // moving origin and wander (it did — 200 → 44 → 326 mid-drag).
+        DragGesture(minimumDistance: 0, coordinateSpace: .global)
+            .onChanged { v in
+                if dragKey != p.key {
+                    guard let i = index(of: p.key) else { return }
+                    dragKey = p.key
+                    dragFrom = i
+                    model.dragging = true
+                }
+                let n = model.previews.count
+                let target = max(0, min(n - 1, dragFrom + Int((v.translation.width / step).rounded())))
+                deal(p.key, to: target)
+                // Keep the pill under the cursor: its offset is measured from the
+                // slot it's in NOW, not the one it left.
+                let cur = index(of: p.key) ?? dragFrom
+                dragX = v.translation.width - CGFloat(cur - dragFrom) * step
+            }
+            .onEnded { v in
+                let cur = index(of: p.key) ?? dragFrom
+                let travelled = hypot(v.translation.width, v.translation.height) > 4
+                withAnimation(.spring(duration: 0.28)) {
+                    dragKey = nil
+                    dragX = 0
+                }
+                model.dragging = false
+                if !travelled {
+                    model.onTap(p)
+                } else if cur != dragFrom {
+                    model.onReorder(model.previews.map(\.key))
+                }
+                model.onDragEnd()
+            }
     }
 }
 
@@ -3522,9 +3849,13 @@ final class SessionStripController {
     func show(_ previews: [SessionPreview], overflow: Int,
               onTap: @escaping (SessionPreview) -> Void,
               onClear: @escaping (SessionPreview) -> Void,
+              onPin: @escaping (SessionPreview) -> Void,
+              onReorder: @escaping ([String]) -> Void,
               onOverflow: @escaping () -> Void) {
         model.onTap = onTap
         model.onClear = onClear
+        model.onPin = onPin
+        model.onReorder = onReorder
         model.onOverflow = onOverflow
         wanted = previews
         wantedOverflow = overflow
@@ -3544,6 +3875,9 @@ final class SessionStripController {
 
     private func sync() {
         syncScheduled = false
+        // A pill is in hand: the view owns the order until it's released. `wanted`
+        // keeps the latest layout, and the drag's end re-arms this (onDragEnd).
+        if model.dragging { return }
         guard let previews = wanted else { applyHide(); return }
         applyShow(previews, overflow: wantedOverflow)
     }
@@ -3588,6 +3922,7 @@ final class SessionStripController {
         host.autoresizingMask = [.width, .height]
         p.contentView = host
         panel = p
+        model.onDragEnd = { [weak self] in self?.setNeedsSync() }
     }
 
     private func position() {
