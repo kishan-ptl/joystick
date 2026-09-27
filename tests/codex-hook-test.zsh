@@ -41,6 +41,19 @@ fire '{"hook_event_name":"UserPromptSubmit","session_id":"s3","cwd":"/tmp","prom
 fire '{"hook_event_name":"PermissionRequest","session_id":"s3","cwd":"/tmp","tool_name":"Bash","tool_input":{"command":"git push","description":"push to origin"}}'
 check "permission → waiting" "$(field s3 waiting '.msg')" "push to origin"
 
+# Under approvals_reviewer=auto_review, Guardian decides without you: a
+# PermissionRequest is live activity, never waiting. The rollout's LATEST
+# reviewer wins (a mid-session /approvals switch back to user re-arms waiting).
+RO=$TMP/rollout.jsonl
+print -r -- '{"type":"turn_context","payload":{"approval_policy":"on-request","approvals_reviewer":"auto_review"}}' > $RO
+fire '{"hook_event_name":"UserPromptSubmit","session_id":"s7","cwd":"/tmp","prompt":"go"}'
+fire "{\"hook_event_name\":\"PermissionRequest\",\"session_id\":\"s7\",\"cwd\":\"/tmp\",\"transcript_path\":\"$RO\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"supabase --help\",\"description\":\"May I read the CLI help?\"}}"
+check "auto_review: no waiting" "$(field s7 waiting '.ev')" ""
+check "auto_review: shown as activity" "$(field s7 active '.act')" "Auto-review: May I read the CLI help?"
+print -r -- '{"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"approvals_reviewer":"user"}}}' >> $RO
+fire "{\"hook_event_name\":\"PermissionRequest\",\"session_id\":\"s7\",\"cwd\":\"/tmp\",\"transcript_path\":\"$RO\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git push\",\"description\":\"push to origin\"}}"
+check "reviewer switched to user: waiting" "$(field s7 waiting '.msg')" "push to origin"
+
 # PostToolUse surfaces the tool just used as activity, and clears waiting.
 fire '{"hook_event_name":"PostToolUse","session_id":"s3","cwd":"/tmp","tool_name":"Edit","tool_input":{"file_path":"/a/b/foo.swift"}}'
 check "activity captured" "$(field s3 active '.act')" "Edit foo.swift"
