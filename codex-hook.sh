@@ -148,6 +148,21 @@ case $event in
     msg=$(jq -r '.tool_input.description // empty' <<<"$input")
     [[ -n $msg ]] || msg="wants to run: ${tool:-a tool}"
     _joystick_redact "$msg"; msg=${REPLY[1,240]}   # a tool invocation can carry secrets
+    # PermissionRequest fires BEFORE the approvals reviewer runs. With
+    # `approvals_reviewer = "auto_review"` a model (Guardian) approves or denies
+    # on its own and never blocks on you, so this is not "needs you" — show it
+    # as live activity instead. The payload doesn't carry the reviewer, but the
+    # rollout does (every turn_context, plus thread_settings_applied on a mid-
+    # turn /approvals switch), so the latest occurrence is the one in force.
+    # Unreadable transcript → fall through to waiting (over-notify, never miss).
+    tpath=$(jq -r '.transcript_path // empty' <<<"$input")
+    reviewer=""
+    [[ -r $tpath ]] && reviewer=$(LC_ALL=C grep -o '"approvals_reviewer":"[a-z_]*"' "$tpath" | tail -1)
+    if [[ $reviewer == *'"auto_review"' ]]; then
+      jq -cn --arg id "$id" --arg act "Auto-review: ${msg[1,107]}" --argjson ts "$now" \
+        '{v:1,ev:"active",id:$id,act:$act,ts:$ts}' >> "$LOG"
+      exit 0
+    fi
     jq -cn --arg id "$id" --arg msg "$msg" --argjson ts "$now" \
       '{v:1,ev:"waiting",id:$id,msg:$msg,ts:$ts}' >> "$LOG"
     : > "${LOG:h}/waiting-$sid"
